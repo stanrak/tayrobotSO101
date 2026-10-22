@@ -1,0 +1,18 @@
+{
+  "first_heldout_seed": {
+    "seed": 20000,
+    "steps": 120,
+    "success": false,
+    "distance_m": 0.015288003681448656,
+    "frames": 61,
+    "last_frame_display_ms": 900
+  },
+  "first_successful_heldout_seed": {
+    "seed": 20001,
+    "steps": 48,
+    "success": true,
+    "distance_m": 0.007691445590987198,
+    "frames": 25,
+    "last_frame_display_ms": 900
+  }
+}

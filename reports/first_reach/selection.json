@@ -1,0 +1,48 @@
+{
+  "rule": "Maximum validation success rate, then minimum validation final distance, then maximum return; held-out results not used for selection.",
+  "selected_run": "reach_low_noise",
+  "candidates": [
+    {
+      "run": "reach_v1",
+      "log_std_init": -0.5,
+      "best_timestep": 25000,
+      "validation": {
+        "episodes": 20,
+        "successes": 1,
+        "success_rate": 0.05,
+        "success_rate_95pct_wilson_interval": [
+          0.008881448800795402,
+          0.23613119344674205
+        ],
+        "mean_return": -135.14160641889987,
+        "mean_final_distance_m": 0.03347768437398161,
+        "median_final_distance_m": 0.03153397148571459,
+        "mean_minimum_distance_m": 0.03266260523932683,
+        "mean_episode_steps": 114.6,
+        "mean_final_hold_steps": 0.5
+      }
+    },
+    {
+      "run": "reach_low_noise",
+      "log_std_init": -2.0,
+      "best_timestep": 200000,
+      "validation": {
+        "episodes": 20,
+        "successes": 19,
+        "collision_episodes": 0,
+        "time_limit_episodes": 1,
+        "success_rate": 0.95,
+        "success_rate_95pct_wilson_interval": [
+          0.763868806553258,
+          0.9911185511992047
+        ],
+        "mean_return": -0.06688091916170755,
+        "mean_final_distance_m": 0.008508170985838708,
+        "median_final_distance_m": 0.00805392789440249,
+        "mean_minimum_distance_m": 0.007819600436682393,
+        "mean_episode_steps": 22.6,
+        "mean_final_hold_steps": 9.5
+      }
+    }
+  ]
+}

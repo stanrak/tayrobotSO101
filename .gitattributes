@@ -1,0 +1,4 @@
+# Vendored model hashes cover exact upstream bytes, including line endings.
+assets/robotstudio_so101/** -text
+*.py text eol=lf
+*.json text eol=lf

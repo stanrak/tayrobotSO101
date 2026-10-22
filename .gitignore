@@ -1,0 +1,7 @@
+# Ignore the instructions file
+instructions/huongdan.md
+
+__pycache__/
+*.py[cod]
+.venv/
+runs/
