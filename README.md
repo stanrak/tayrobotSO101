@@ -11,6 +11,8 @@ python -m so101_sim
 
 This opens a MuJoCo 3D window with the SO-101 at its initial pose. Click the 3D view, then use the laptop keys below to move the robot. The application starts in manual control mode.
 
+Startup checks NumPy, MuJoCo, and Gymnasium before opening the window. If the current Python is missing one, it prints that interpreter's path and uses the prepared project `.venv` when available. Otherwise it prints an installation command for the exact Python that needs the packages.
+
 On Windows you can also **double-click [run_simulation.bat](run_simulation.bat)** in File Explorer, or run:
 
 ```powershell
@@ -46,17 +48,26 @@ python -m so101_sim --seconds 10
 
 ## Install dependencies if needed
 
-Run from the repository root. The project was verified with Python 3.14.6 and the versions in `requirements.txt`. If these dependencies are already installed, the start command above is sufficient.
+Run from the repository root. The project was verified with Python 3.14.6 and the versions in `requirements-sim.txt`. If these simulation dependencies are already installed, the start command above is sufficient.
 
 For a separate virtual environment, activation is optional:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python -m pip install -r requirements.txt
+.\.venv\Scripts\python -m pip install -r requirements-sim.txt
 .\.venv\Scripts\python -m so101_sim
 ```
 
-If the window does not open, run `python -m so101_sim` in PowerShell to read the error. Use the same Python interpreter for dependency installation and application launch. When using the batch launcher with a virtual environment, install into that environment.
+`requirements-sim.txt` installs NumPy, MuJoCo, and Gymnasium for keyboard control. Install `requirements.txt` into the same environment when reinforcement learning libraries are needed.
+
+If `ModuleNotFoundError: No module named 'gymnasium'` appears in a terminal or IDE, install into the interpreter you will use to launch the simulation:
+
+```powershell
+.\.venv\Scripts\python -m pip install -r requirements-sim.txt
+.\.venv\Scripts\python -m so101_sim
+```
+
+If the window does not open, run the explicit `.venv` command in PowerShell to read the error. Use the same Python interpreter for dependency installation and application launch. The batch launcher also uses this project environment.
 
 The robot uses the pinned [MuJoCo Menagerie SO101 model](https://github.com/google-deepmind/mujoco_menagerie/tree/3abca2e302625cec9429c49806121ea2855cef81/robotstudio_so101), with its original dynamics, meshes, collisions, joint and actuator limits, and [Apache-2.0 license](assets/robotstudio_so101/LICENSE). Its assets are included:
 
