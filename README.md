@@ -1,107 +1,116 @@
 # SO-101 Physical AI simulation
 
-A MuJoCo simulation of the SO-101, a first reinforcement learning task, and keyboard control of all six joints. The robot uses the pinned [MuJoCo Menagerie SO101 model](https://github.com/google-deepmind/mujoco_menagerie/tree/3abca2e302625cec9429c49806121ea2855cef81/robotstudio_so101), with its original dynamics, meshes, collisions, joint limits, actuator limits, and [Apache-2.0 license](assets/robotstudio_so101/LICENSE).
+## Start the simulation and use your laptop keyboard
 
-![SO-101 learned reach with a green target](docs/successful_reach.gif)
-
-The included policy achieved **80 successes in 100 independent evaluation episodes**, with **9.29 mm mean final distance** across all episodes. No-motion and random baselines both achieved 0/100. The selected run completed 301,056 training steps; validation selected the checkpoint at 200,000 steps. Full metrics, every episode, learning curves, and both success and timeout examples are in the [recorded experiment](reports/first_reach/README.md).
-
-## Run locally
-
-Run these commands from the repository root in PowerShell. The implementation was verified with Python 3.14.6 and the exact versions in `requirements.txt`. If the dependencies are already installed, use that Python directly. For a new installation:
+Run this in PowerShell:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python -m pip install -r requirements.txt
-.\.venv\Scripts\Activate.ps1
+cd D:\tayrobotSO101
+python -m so101_sim
 ```
 
-The robot assets are included. Verify their hashes with:
+This opens a MuJoCo 3D window with the SO-101 at its initial pose. Click the 3D view, then use the laptop keys below to move the robot. The application starts in manual control mode.
+
+On Windows you can also **double-click [run_simulation.bat](run_simulation.bat)** in File Explorer, or run:
 
 ```powershell
-python scripts/fetch_model.py --verify
+.\run_simulation.bat
 ```
 
-If assets are missing or damaged, `python scripts/fetch_model.py` restores them from the pinned upstream commit. It does not download from a moving branch. `assets/model_manifest.json` records the source commit and every downloaded file's SHA256; Git preserves the upstream asset bytes.
+The launcher uses `.venv\Scripts\python.exe` when present, otherwise `python` from PATH. The existing `python -m so101_sim.teleop` command still opens the same manual simulator.
 
-## Keyboard control
-
-```powershell
-python -m so101_sim.teleop
-```
-
-Click the MuJoCo 3D view so it receives keyboard input. Use plain keys without Ctrl or Alt. Each press changes a joint target by 2 degrees. Repeated presses continue moving that target; behavior while holding a key follows the viewer's key-repeat behavior. Position commands are limited to 0.8 rad/s and clamped to the intersection of joint and actuator limits.
-
-| Increase / decrease | Joint |
+| Increase / decrease | Robot joint |
 | --- | --- |
-| Q / A | Shoulder pan |
+| Q / A | Shoulder pan: turn the base |
 | W / S | Shoulder lift |
 | E / D | Elbow flex |
 | R / F | Wrist flex |
 | T / G | Wrist roll |
 | Y / H | Gripper opening angle |
-| Backspace | Move joint targets smoothly back to home |
-| N | Reset the robot and sample a new reach target |
-| Space | Pause / resume physics |
-| Escape | Exit |
+| Space | Pause / resume simulation |
+| Backspace | Move joint targets smoothly back to the initial pose |
+| N | Reset the initial pose and sample a new target |
+| Escape | Close the simulation |
 
-Commands entered while paused take effect after resuming. MuJoCo also receives the keys, so some letters toggle its rendering options; Tab shows or hides its UI. Camera and rendering controls remain available. This keyboard mode owns the physics state, so viewer sliders and mouse perturbations do not change it. An optional `--seconds 10` closes the viewer automatically.
+Use plain keys without Ctrl or Alt; no numeric keypad is required. Press repeatedly: each press changes its joint target by 2 degrees. Holding a key does not repeat robot commands in the current MuJoCo viewer. Position commands are limited to 0.8 rad/s and the model's joint and actuator limits. Commands typed while paused take effect after resuming. MuJoCo also receives keyboard shortcuts, so some letters change rendering options. Tab toggles the viewer panels.
 
-Keyboard control operates the **simulated** arm. It does not connect to physical servos or a serial port. The six-joint model remains enabled, so manual commands can still cause contacts; command limits do not provide collision-free path planning.
+The green sphere marks a learning target. In manual mode the robot moves according to your keyboard commands. The launcher does not start PPO, load a trained policy, or complete the task automatically. It controls the simulated robot on this laptop.
 
-## First learning task: local reach and hold
-
-The policy moves the end-effector site `gripperframe` to a green target. An episode succeeds when the Cartesian distance is below **15 mm** and the first three joint velocities have a combined magnitude below **0.3 rad/s**, continuously for **10 control steps (0.5 s)**. The deadline is 120 control steps (6 s).
-
-- The first three joints are learned actions: shoulder pan, shoulder lift, and elbow flex. Wrist flex, wrist roll, and gripper targets stay at their home values. Keyboard mode can control all six.
-- Physics runs at 200 Hz and the policy at 20 Hz. Actions request absolute joint targets within a conservative local joint box, with the same 0.8 rad/s command slew limit.
-- Each reset adds small joint-position jitter. A new target is sampled by forward kinematics inside a local joint box, at least 40 mm from the starting end-effector and above 80 mm height, rejecting contact penetrations deeper than 4 mm.
-- The 15-value observation contains joint positions, velocities, current actuator commands, Cartesian target, and Cartesian error. The joint configuration used to sample the goal is never given to the policy. There is no IK controller or scripted task solution.
-- The reward penalizes Cartesian distance and velocity, adds a nonpositive proximity term, and gives a terminal success bonus. Per-step reward cannot become positive merely by waiting near a target. Penetrating contacts beyond 4 mm, checked at each 20 Hz control boundary, terminate with a penalty.
-
-Exact joint boxes, reward coefficients, reset settings, and observation scaling are recorded by `SO101ReachEnv.task_config` and checkpoint metadata. This is a state-based first exercise in a restricted local workspace. It does not yet teach grasping, vision, arbitrary wrist orientation, or operation on real hardware. Successful simulation episodes do not establish sim-to-real performance.
-
-## Train and evaluate
-
-Start a new run explicitly:
+For an automatically closing manual window:
 
 ```powershell
-python -m so101_sim.train --timesteps 300000 --output runs/my_reach --seed 42 --log-std-init -2
+python -m so101_sim --seconds 10
 ```
 
-The trainer uses PPO on CPU with eight environments and initial action standard deviation exp(-2), approximately 0.135. It records training curves, validation curves, full configuration, asset and environment signatures, and checkpoints. Requested timesteps round up to complete PPO rollouts. Existing run directories containing checkpoints are protected from accidental overwrite. No training starts when importing modules or running keyboard control.
+![Initial SO-101 simulation](docs/simulation.png)
 
-Checkpoint selection uses 20 fixed validation seeds starting at 10000. Final evaluation uses 100 separate seeds starting at 20000, comparing deterministic learned actions with no-motion and uniformly random action baselines under identical initial conditions. The report contains every episode and a 95% Wilson interval for success rate.
+## Install dependencies if needed
 
-Evaluate the included first policy or play five episodes:
+Run from the repository root. The project was verified with Python 3.14.6 and the versions in `requirements.txt`. If these dependencies are already installed, the start command above is sufficient.
+
+For a separate virtual environment, activation is optional:
 
 ```powershell
-python -m so101_sim.evaluate --checkpoint checkpoints/first_reach/best_model.zip --episodes 100 --output runs/recheck.json
-python -m so101_sim.evaluate --checkpoint checkpoints/first_reach/best_model.zip --episodes 5 --render --output runs/playback.json
+python -m venv .venv
+.\.venv\Scripts\python -m pip install -r requirements.txt
+.\.venv\Scripts\python -m so101_sim
 ```
 
-Keep each checkpoint's `.metadata.json` sidecar. Loading checks the checkpoint hash, pinned model assets, task configuration, environment source, and library versions. An incompatible environment is rejected explicitly; checkpoints are not migrated automatically.
+If the window does not open, run `python -m so101_sim` in PowerShell to read the error. Use the same Python interpreter for dependency installation and application launch. When using the batch launcher with a virtual environment, install into that environment.
 
-## Verification
+The robot uses the pinned [MuJoCo Menagerie SO101 model](https://github.com/google-deepmind/mujoco_menagerie/tree/3abca2e302625cec9429c49806121ea2855cef81/robotstudio_so101), with its original dynamics, meshes, collisions, joint and actuator limits, and [Apache-2.0 license](assets/robotstudio_so101/LICENSE). Its assets are included:
+
+```powershell
+python scripts/fetch_model.py --verify
+```
+
+`python scripts/fetch_model.py` restores missing or damaged assets from the pinned upstream commit. `assets/model_manifest.json` records all downloaded file hashes.
+
+## Development scope and the first network update
+
+Current work is limited to code, the initial simulation environment, and a startup trial ending at the **first actual network update**. The agent may choose the initial step count according to the task and training setup. There is no fixed 500-step maximum; 500 remains a convenience default when `--timesteps` is omitted. Long training and automatic evaluation require a later explicit user request. Manual keyboard control and startup training are separate entry points.
+
+For example, a task needing 2048 initial transitions can use:
+
+```powershell
+python -m so101_sim.train --timesteps 2048 --output runs/startup_trial --seed 42
+```
+
+The agent must choose and explain a suitable initial budget before a real trial. The current PPO startup mode uses one environment, collects exactly the requested number of transitions (at least two), then performs one optimization epoch with the complete rollout as one batch. This produces exactly one optimizer step. An actual optimizer-call counter prevents a second update; a completed episode, rollout, or set of epochs is not used as a substitute for counting network updates.
+
+The trial does not add validation episodes, comparison baselines, checkpoint selection, or an old policy. Its metadata records the selected step budget, actual transitions, actual optimizer steps, and stopping reason. This is a startup diagnostic, not evidence that the task has been learned. A new trial requires a fresh output directory and must remain within the authorized work.
+
+Continuing beyond the first network update requires a later explicit user request and the `--full-training` mode. Choosing more initial transitions does not require that flag and does not authorize further updates. Neither the manual launcher nor code and documentation changes automatically start training.
+
+Only the policy's sampled actions control the robot during a trial. There is no IK solver, scripted reach controller, or teacher that performs the task for the policy. The environment initializes the robot and samples reachable Cartesian targets using forward kinematics on separate scratch simulation data. The generating joint angles are withheld from the policy and never become control commands.
+
+## Initial learning environment
+
+The first task is local reach and hold. Success requires the `gripperframe` site to stay within 15 mm of the target, with combined speed of the first three joints below 0.3 rad/s, for ten consecutive 20 Hz control steps (0.5 s). Each episode has a six second deadline.
+
+The first three joints are policy actions; wrist and gripper targets stay at their initial values. Manual keyboard control supports all six joints. Physics runs at 200 Hz. The 15-value observation contains joint positions, velocities, current actuator commands, the Cartesian target, and Cartesian error. Exact reset settings, action ranges, and reward coefficients are recorded by `SO101ReachEnv.task_config`.
+
+Targets start at least 40 mm from the initial end-effector and above 80 mm height, with penetration rejection at the configured 4 mm tolerance. Per-step reward is nonpositive and terminal success receives a bonus. Contacts deeper than the tolerance are checked at 20 Hz control boundaries and terminate the episode with a penalty.
+
+## Verification and historical artifacts
 
 ```powershell
 python -m unittest discover -s tests -v
 python scripts/fetch_model.py --verify
 ```
 
-The tests cover the Gymnasium contract, seeded physics, reachable-target constraints, success hold duration, time limits, action validation, command limits, reward behavior, keyboard mappings, pause/reset behavior, and real MuJoCo movement under a simulated viewer callback. Offscreen rendering was also checked. Interactive keyboard behavior in a visible window remains a manual check.
+Tests cover keyboard mappings and real MuJoCo movement through a simulated viewer, pause/reset behavior, task contracts, model and checkpoint integrity, and the first-update stopping rule. Unit tests for training use fake counters rather than real training rollouts. A visible GUI still needs a manual keyboard check on the laptop.
 
-## Project layout
+Earlier long-run checkpoints and reports remain under `checkpoints/first_reach/` and `reports/first_reach/` as historical artifacts. Starting the application or a startup trial does not replay or continue those experiments. Checkpoint compatibility checks remain in place; no model or checkpoint migration is performed by the launcher.
 
 | Path | Purpose |
 | --- | --- |
-| `so101_sim/env.py` | Shared model and reach-and-hold environment |
-| `so101_sim/teleop.py` | Keyboard simulation control |
-| `so101_sim/train.py` | Explicit PPO training entry point |
-| `so101_sim/evaluate.py` | Checked policy loading, evaluation, and playback |
-| `assets/robotstudio_so101/` | Unmodified, licensed upstream robot model |
-| `checkpoints/first_reach/` | Included trained policy and metadata |
-| `reports/first_reach/` | Recorded training and evaluation results |
-| `runs/` | Ignored local experiment outputs |
+| `run_simulation.bat` | Double-click Windows simulation launcher |
+| `so101_sim/__main__.py` | `python -m so101_sim` manual entry point |
+| `so101_sim/teleop.py` | Laptop keyboard controls |
+| `so101_sim/env.py` | Initial robot environment and task |
+| `so101_sim/train.py` | Trial through the first network update and explicit full training mode |
+| `assets/robotstudio_so101/` | Unmodified upstream robot assets |
+| `runs/` | Ignored local diagnostic outputs |
 
-Repository-specific instructions remain in `AGENTS.md` and the `instructions` directory.
+Read `AGENTS.md` and every local file in `instructions` before repository work. Agent-maintained guidance belongs in English in `instructions/instruction.md`. The user-owned Vietnamese file `instructions/huongdan.md` must stay unchanged and excluded from Git.

@@ -119,7 +119,8 @@ def run(*, seconds: float | None = None) -> None:
         for pair, name in zip(JOINT_KEY_PAIRS, names, strict=True):
             print(f"  {pair[0]} / {pair[1]}: {name}", flush=True)
         print(
-            "Each press changes its target by 2 degrees; command speed <= 0.8 rad/s.\n"
+            "Press repeatedly: each press changes its target by 2 degrees.\n"
+            "Holding a key does not repeat commands; command speed <= 0.8 rad/s.\n"
             "Backspace: home targets | N: new episode | Space: pause/resume | Esc: quit\n"
             "Joint commands typed while paused take effect after resuming.\n"
             "MuJoCo also receives these keys; some letters toggle rendering options,\n"
@@ -138,7 +139,7 @@ def run(*, seconds: float | None = None) -> None:
             show_right_ui=False,
         ) as viewer:
             with viewer.lock():
-                viewer.cam.lookat[:] = [0.0, 0.0, 0.18]
+                viewer.cam.lookat[:] = [0.17, 0.0, 0.17]
                 viewer.cam.distance = 0.8
                 viewer.cam.azimuth = 140.0
                 viewer.cam.elevation = -25.0

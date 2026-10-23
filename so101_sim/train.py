@@ -1,4 +1,4 @@
-"""Train the first SO-101 reaching policy using PPO on CPU."""
+"""Check the PPO startup pipeline through its first optimizer step; full training is opt-in."""
 
 from __future__ import annotations
 
@@ -21,6 +21,9 @@ from .env import SO101ReachEnv
 from .evaluate import environment_signature, evaluate_checkpoint, run_episodes, save_checkpoint, write_json
 
 
+DEFAULT_TRIAL_TIMESTEPS = 500
+
+
 def _finite_float(value: str) -> float:
     try:
         parsed = float(value)
@@ -29,6 +32,30 @@ def _finite_float(value: str) -> float:
     if not math.isfinite(parsed):
         raise argparse.ArgumentTypeError("value must be a finite number")
     return parsed
+
+
+class _OptimizerStepCounter:
+    """Count completed optimizer calls and reject an unauthorized trial update."""
+
+    def __init__(self, optimizer: Any, *, limit: int | None = None):
+        self.optimizer = optimizer
+        self.limit = limit
+        self.count = 0
+        self.original_step = optimizer.step
+
+    def step(self, *args: Any, **kwargs: Any) -> Any:
+        if self.limit is not None and self.count >= self.limit:
+            raise RuntimeError("Startup trial attempted a second optimizer step; only the first network update is allowed.")
+        result = self.original_step(*args, **kwargs)
+        self.count += 1
+        return result
+
+    def __enter__(self) -> _OptimizerStepCounter:
+        self.optimizer.step = self.step
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self.optimizer.step = self.original_step
 
 
 class FixedSeedEvaluation(BaseCallback):
@@ -109,19 +136,34 @@ class FixedSeedEvaluation(BaseCallback):
         self.eval_env.close()
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--timesteps", type=int, default=500_000)
-    parser.add_argument("--output", type=Path, default=Path("runs/reach"))
+    parser.add_argument(
+        "--full-training", action="store_true",
+        help="Explicitly enable unrestricted training, validation and held-out evaluation.",
+    )
+    parser.add_argument(
+        "--timesteps", type=int,
+        help="Startup rollout budget until the first network update (at least 2; default: 500), or total transitions with --full-training (default: 500000).",
+    )
+    parser.add_argument("--output", type=Path, help="Fresh output directory (default: runs/startup_trial or runs/reach).")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--envs", type=int, default=8)
+    parser.add_argument("--envs", type=int, help="Parallel environments (startup trial: 1 only; full training default: 8).")
     parser.add_argument("--eval-frequency", type=int, default=25_000)
     parser.add_argument("--eval-episodes", type=int, default=20)
     parser.add_argument("--heldout-episodes", type=int, default=100)
     parser.add_argument("--log-std-init", type=_finite_float, default=-2.0, help="Finite initial Gaussian policy log standard deviation (default: -2).")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    trial = not args.full_training
+    args.timesteps = args.timesteps if args.timesteps is not None else (DEFAULT_TRIAL_TIMESTEPS if trial else 500_000)
+    args.envs = args.envs if args.envs is not None else (1 if trial else 8)
+    args.output = args.output or Path("runs/startup_trial" if trial else "runs/reach")
     if min(args.timesteps, args.envs, args.eval_frequency, args.eval_episodes, args.heldout_episodes) < 1:
         parser.error("timesteps, envs and evaluation counts must be positive")
+    if trial and args.timesteps < 2:
+        parser.error("A startup trial requires at least 2 environment steps before its first network update.")
+    if trial and args.envs != 1:
+        parser.error("A startup trial uses exactly one environment so its total step budget cannot be multiplied by --envs.")
     output = args.output.resolve()
     if any(output.glob("*.zip")) or (output / "training.json").exists():
         parser.error(f"Output contains an existing run; choose a fresh --output directory: {output}")
@@ -130,14 +172,21 @@ def main() -> None:
     torch.use_deterministic_algorithms(True)
     config = {
         "algorithm": "PPO",
+        "mode": "startup_trial" if trial else "full_training",
         "requested_timesteps": args.timesteps,
+        "environment_step_limit": args.timesteps if trial else None,
+        "selected_rollout_budget": args.timesteps if trial else None,
+        "trial_stop_criterion": "first_optimizer_step" if trial else None,
+        "max_gradient_updates": 1 if trial else None,
         "seed": args.seed,
         "num_envs": args.envs,
         "device": "cpu",
         "torch_threads": 1,
-        "n_steps": 256,
-        "batch_size": 256,
-        "n_epochs": 10,
+        # A startup trial collects one task-specific rollout and optimizes its
+        # entire batch once, so the first optimizer call ends the trial.
+        "n_steps": args.timesteps if trial else 256,
+        "batch_size": args.timesteps if trial else 256,
+        "n_epochs": 1 if trial else 10,
         "learning_rate": 0.0003,
         "gamma": 0.99,
         "gae_lambda": 0.95,
@@ -149,10 +198,11 @@ def main() -> None:
         "log_std_init": args.log_std_init,
         "observation_normalization": False,
         "reward_normalization": False,
-        "evaluation_frequency": args.eval_frequency,
-        "validation_episodes": args.eval_episodes,
-        "heldout_episodes": args.heldout_episodes,
-        "heldout_seed_start": 20_000,
+        "evaluation_frequency": None if trial else args.eval_frequency,
+        "validation_episodes": 0 if trial else args.eval_episodes,
+        "heldout_episodes": 0 if trial else args.heldout_episodes,
+        "heldout_seed_start": None if trial else 20_000,
+        "checkpoint_loaded": False,
         "started_utc": datetime.now(timezone.utc).isoformat(),
     }
     probe = SO101ReachEnv()
@@ -160,7 +210,12 @@ def main() -> None:
         signature = environment_signature(probe)
     finally:
         probe.close()
-    write_json(output / "training.json", {"status": "running", "config": config, "environment": signature})
+    write_json(
+        output / "training.json",
+        {"status": "trial_running" if trial else "running", "mode": config["mode"],
+         "config": config, "environment": signature, "actual_timesteps": 0,
+         "update_count": 0, "optimizer_steps": 0, "gradient_update_count": 0},
+    )
 
     def make_env(index: int):
         def factory():
@@ -174,15 +229,34 @@ def main() -> None:
     vector_env = DummyVecEnv([make_env(index) for index in range(args.envs)])
     vector_env.seed(args.seed)
     start_time = time.perf_counter()
-    callback = FixedSeedEvaluation(
-        output,
-        signature,
-        config,
-        eval_frequency=args.eval_frequency,
-        eval_episodes=args.eval_episodes,
-        start_time=start_time,
-    )
+    callback = None
+    model = None
+    optimizer_counter = None
+
+    def progress() -> dict[str, Any]:
+        epochs = int(model._n_updates) if model is not None else 0
+        return {
+            "actual_timesteps": int(model.num_timesteps) if model is not None else 0,
+            # With no target_kl/early stopping, every PPO rollout update executes
+            # n_epochs complete optimization epochs, as counted by SB3.
+            "update_count": epochs // config["n_epochs"],
+            "update_count_unit": "completed PPO rollout updates",
+            "optimization_epochs": epochs,
+            "optimizer_steps": optimizer_counter.count if optimizer_counter is not None else 0,
+            "gradient_update_count": optimizer_counter.count if optimizer_counter is not None else 0,
+            "gradient_update_count_unit": "completed optimizer.step calls",
+        }
+
     try:
+        if not trial:
+            callback = FixedSeedEvaluation(
+                output,
+                signature,
+                config,
+                eval_frequency=args.eval_frequency,
+                eval_episodes=args.eval_episodes,
+                start_time=start_time,
+            )
         model = PPO(
             "MlpPolicy",
             vector_env,
@@ -202,7 +276,42 @@ def main() -> None:
             verbose=1,
         )
         model.set_logger(configure(str(output), ["stdout", "csv"]))
-        model.learn(total_timesteps=args.timesteps, callback=callback, log_interval=5)
+        with _OptimizerStepCounter(model.policy.optimizer, limit=1 if trial else None) as optimizer_counter:
+            model.learn(total_timesteps=args.timesteps, callback=callback, log_interval=1 if trial else 5)
+        if trial:
+            if optimizer_counter.count != 1:
+                raise RuntimeError("Startup trial ended before its first optimizer step completed.")
+            # No validation callback, playback, baselines or held-out episodes run
+            # in this branch. These transitions are the entire startup trial.
+            metadata = {
+                **config, **progress(),
+                "elapsed_seconds": time.perf_counter() - start_time,
+                "trial_stop_reason": "first_optimizer_step_completed",
+                "task_performance_evaluated": False,
+            }
+            save_checkpoint(model, output / "trial_model.zip", signature, metadata)
+            write_json(
+                output / "training.json",
+                {
+                    "status": "trial_completed",
+                    "mode": config["mode"],
+                    "trial_status": "first_network_update_completed",
+                    "trial_stop_criterion": config["trial_stop_criterion"],
+                    "trial_stop_reason": "first_optimizer_step_completed",
+                    "selected_rollout_budget": config["selected_rollout_budget"],
+                    "config": config,
+                    "environment": signature,
+                    **progress(),
+                    "training_seconds": time.perf_counter() - start_time,
+                    "finished_utc": datetime.now(timezone.utc).isoformat(),
+                    "checkpoint": "trial_model.zip",
+                    "task_performance_evaluated": False,
+                },
+            )
+            print(f"Startup trial finished: {model.num_timesteps} total environment steps, "
+                  f"{optimizer_counter.count} network update (optimizer.step).")
+            print(f"Task performance has not been evaluated. Startup trial files: {output}")
+            return
         save_checkpoint(model, output / "final_model.zip", signature, callback.training_metadata())
         training_seconds = time.perf_counter() - start_time
         report = evaluate_checkpoint(output / "best_model.zip", episodes=args.heldout_episodes, seed=20_000)
@@ -211,9 +320,10 @@ def main() -> None:
             output / "training.json",
             {
                 "status": "completed",
+                "mode": config["mode"],
                 "config": config,
                 "environment": signature,
-                "actual_timesteps": model.num_timesteps,
+                **progress(),
                 "training_seconds": training_seconds,
                 "total_seconds_including_heldout_evaluation": time.perf_counter() - start_time,
                 "finished_utc": datetime.now(timezone.utc).isoformat(),
@@ -231,8 +341,12 @@ def main() -> None:
             output / "training.json",
             {
                 "status": "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
+                "mode": config["mode"],
+                **({"trial_status": "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"} if trial else {}),
                 "config": config,
                 "environment": signature,
+                **progress(),
+                "task_performance_evaluated": False,
                 "elapsed_seconds": time.perf_counter() - start_time,
                 "error": f"{type(exc).__name__}: {exc}",
             },
@@ -240,7 +354,8 @@ def main() -> None:
         raise
     finally:
         vector_env.close()
-        callback.eval_env.close()
+        if callback is not None:
+            callback.eval_env.close()
 
 
 if __name__ == "__main__":
