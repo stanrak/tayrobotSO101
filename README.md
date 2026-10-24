@@ -95,6 +95,28 @@ Continuing beyond the first network update requires a later explicit user reques
 
 Only the policy's sampled actions control the robot during a trial. There is no IK solver, scripted reach controller, or teacher that performs the task for the policy. The environment initializes the robot and samples reachable Cartesian targets using forward kinematics on separate scratch simulation data. The generating joint angles are withheld from the policy and never become control commands.
 
+## Watch training as it happens
+
+Add `--viewer` (also accepted as `--render`) to observe the robot during the actual training rollout. The window shows environment 0; the terminal reports total transitions across all environments, the observed episode count, distance to the target, and completed optimizer steps. It also announces when a rollout ends and network optimization begins.
+
+Watch a startup trial that stops after the first network update:
+
+```powershell
+.\.venv\Scripts\python -m so101_sim.train --viewer --timesteps 500 --output runs/trial_view_01 --seed 42
+```
+
+For a user-started full training run with a live viewer:
+
+```powershell
+.\.venv\Scripts\python -m so101_sim.train --full-training --viewer --timesteps 300000 --output runs/train_view_01 --seed 42
+```
+
+Omit `--viewer` to train without a graphics window. Use a new output directory for each run. The viewer option must be supplied when starting the run; it does not attach to an already running headless process.
+
+By default the observed environment is paced at real time. `--viewer-speed 4` displays it at four times simulation speed. Display pacing slows wall-clock training but does not alter physics time, policy actions, or update budgets. With multiple environments, only environment 0 is displayed. During network optimization or validation the robot display may remain still while terminal messages show the training phase.
+
+Mouse camera controls remain available. The viewer uses separate copies of the training model and data, so viewer physics controls cannot modify the robot used for learning. No keyboard task controller, scripted solver, or extra policy rollout is used. Close the viewer window or press Ctrl+C in the terminal to interrupt training; its status is recorded and no final evaluation is started on interruption. The viewer closes after policy training; full training then completes its normal checkpoint evaluation.
+
 ## Initial learning environment
 
 The first task is local reach and hold. Success requires the `gripperframe` site to stay within 15 mm of the target, with combined speed of the first three joints below 0.3 rad/s, for ten consecutive 20 Hz control steps (0.5 s). Each episode has a six second deadline.

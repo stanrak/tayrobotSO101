@@ -265,6 +265,37 @@ class StartupTrialTests(unittest.TestCase):
         self.assertEqual(sum(env.step_calls for env in CountingEnvironment.instances), 3)
         self.assertTrue(all(env.closed for env in CountingEnvironment.instances))
 
+    def test_viewer_trial_still_performs_only_one_network_update(self):
+        with patch("so101_sim.training_view.TrainingViewer") as viewer:
+            _, validation, evaluation, episodes = self.run_fake_trial("--viewer", "--timesteps", "23")
+        report = json.loads((self.output / "training.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["optimizer_steps"], 1)
+        self.assertTrue(report["config"]["live_viewer"])
+        viewer.return_value.close.assert_called_once()
+        validation.assert_not_called()
+        evaluation.assert_not_called()
+        episodes.assert_not_called()
+
+    def test_full_viewer_keeps_validation_checkpoint_metadata_and_cleanup(self):
+        summary = {"successes": 0, "episodes": 1, "mean_final_distance_m": 0.1}
+        with (
+            patch.object(train, "SO101ReachEnv", CountingEnvironment),
+            patch.object(train, "PPO", RolloutRoundingPPO),
+            patch.object(train, "environment_signature", return_value={"fake": True}),
+            patch.object(train, "configure", return_value=MagicMock()),
+            patch.object(train, "save_checkpoint") as save,
+            patch.object(train, "FixedSeedEvaluation") as validation,
+            patch.object(train, "CallbackList") as combined,
+            patch("so101_sim.training_view.TrainingViewer") as viewer,
+            patch.object(train, "evaluate_checkpoint", return_value={"results": {"trained": {"summary": summary}}}),
+            redirect_stdout(io.StringIO()),
+        ):
+            train.main(["--full-training", "--viewer", "--timesteps", "501", "--output", str(self.output)])
+        combined.assert_called_once_with([viewer.return_value, validation.return_value])
+        self.assertIs(save.call_args.args[3], validation.return_value.training_metadata.return_value)
+        validation.return_value.eval_env.close.assert_called_once()
+        viewer.return_value.close.assert_called_once()
+
     def test_full_training_keeps_existing_rollout_and_validation_defaults(self):
         summary = {"successes": 0, "episodes": 1, "mean_final_distance_m": 0.1}
         with (

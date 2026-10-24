@@ -11,7 +11,7 @@ import time
 from typing import Any
 
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -148,6 +148,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--output", type=Path, help="Fresh output directory (default: runs/startup_trial or runs/reach).")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--viewer", "--render", action="store_true", help="Watch actual training in a live MuJoCo viewer (environment 0).")
+    parser.add_argument("--viewer-speed", type=_finite_float, default=1.0, help="Viewer simulation speed multiplier (default: 1, real time).")
     parser.add_argument("--envs", type=int, help="Parallel environments (startup trial: 1 only; full training default: 8).")
     parser.add_argument("--eval-frequency", type=int, default=25_000)
     parser.add_argument("--eval-episodes", type=int, default=20)
@@ -158,6 +160,8 @@ def main(argv: list[str] | None = None) -> None:
     args.timesteps = args.timesteps if args.timesteps is not None else (DEFAULT_TRIAL_TIMESTEPS if trial else 500_000)
     args.envs = args.envs if args.envs is not None else (1 if trial else 8)
     args.output = args.output or Path("runs/startup_trial" if trial else "runs/reach")
+    if args.viewer_speed <= 0:
+        parser.error("viewer-speed must be positive")
     if min(args.timesteps, args.envs, args.eval_frequency, args.eval_episodes, args.heldout_episodes) < 1:
         parser.error("timesteps, envs and evaluation counts must be positive")
     if trial and args.timesteps < 2:
@@ -203,6 +207,8 @@ def main(argv: list[str] | None = None) -> None:
         "heldout_episodes": 0 if trial else args.heldout_episodes,
         "heldout_seed_start": None if trial else 20_000,
         "checkpoint_loaded": False,
+        "live_viewer": args.viewer,
+        "viewer_speed": args.viewer_speed if args.viewer else None,
         "started_utc": datetime.now(timezone.utc).isoformat(),
     }
     probe = SO101ReachEnv()
@@ -230,8 +236,10 @@ def main(argv: list[str] | None = None) -> None:
     vector_env.seed(args.seed)
     start_time = time.perf_counter()
     callback = None
+    evaluation_callback = None
     model = None
     optimizer_counter = None
+    view_callback = None
 
     def progress() -> dict[str, Any]:
         epochs = int(model._n_updates) if model is not None else 0
@@ -257,6 +265,12 @@ def main(argv: list[str] | None = None) -> None:
                 eval_episodes=args.eval_episodes,
                 start_time=start_time,
             )
+            evaluation_callback = callback
+        if args.viewer:
+            from .training_view import TrainingViewer
+
+            view_callback = TrainingViewer(speed=args.viewer_speed, progress=progress)
+            callback = CallbackList([view_callback, callback]) if callback is not None else view_callback
         model = PPO(
             "MlpPolicy",
             vector_env,
@@ -312,7 +326,7 @@ def main(argv: list[str] | None = None) -> None:
                   f"{optimizer_counter.count} network update (optimizer.step).")
             print(f"Task performance has not been evaluated. Startup trial files: {output}")
             return
-        save_checkpoint(model, output / "final_model.zip", signature, callback.training_metadata())
+        save_checkpoint(model, output / "final_model.zip", signature, evaluation_callback.training_metadata())
         training_seconds = time.perf_counter() - start_time
         report = evaluate_checkpoint(output / "best_model.zip", episodes=args.heldout_episodes, seed=20_000)
         write_json(output / "evaluation.json", report)
@@ -354,9 +368,14 @@ def main(argv: list[str] | None = None) -> None:
         raise
     finally:
         vector_env.close()
-        if callback is not None:
-            callback.eval_env.close()
+        if view_callback is not None:
+            view_callback.close()
+        if evaluation_callback is not None:
+            evaluation_callback.eval_env.close()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Training stopped.", flush=True)
