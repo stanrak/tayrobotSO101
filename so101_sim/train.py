@@ -1,4 +1,4 @@
-"""Check the PPO startup pipeline through its first optimizer step; full training is opt-in."""
+"""Train PPO continuously, with optional step limits or a first-update startup trial."""
 
 from __future__ import annotations
 
@@ -57,6 +57,25 @@ class _OptimizerStepCounter:
 
     def __exit__(self, *exc_info: Any) -> None:
         self.optimizer.step = self.original_step
+
+
+class _TrainingStepLimit(BaseCallback):
+    """Stop at an exact transition budget while allowing complete rollout updates."""
+
+    def __init__(self, limit: int, rollout_size: int):
+        super().__init__()
+        self.limit = limit
+        self.rollout_size = rollout_size
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps < self.limit:
+            return True
+        if self.num_timesteps > self.limit:
+            raise RuntimeError("Training exceeded its environment step limit.")
+        # SB3 checks callbacks before adding the latest transition to its buffer.
+        # A complete final rollout must return True so PPO can optimize it;
+        # otherwise discard the incomplete rollout and stop without overshooting.
+        return self.limit % self.rollout_size == 0
 
 
 class FixedSeedEvaluation(BaseCallback):
@@ -139,13 +158,18 @@ class FixedSeedEvaluation(BaseCallback):
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--trial", action="store_true",
+        help="Run only through the first optimizer step (default rollout: 500 environment steps).",
+    )
+    mode.add_argument(
         "--full-training", action="store_true",
-        help="Explicitly enable unrestricted training, validation and held-out evaluation.",
+        help="Compatibility alias for the default full training mode.",
     )
     parser.add_argument(
         "--timesteps", type=int,
-        help="Startup rollout budget until the first network update (at least 2; default: 500), or total transitions with --full-training (default: 500000).",
+        help="Stop after this many total training transitions (default: unlimited). With --trial: rollout budget before the first network update (at least 2; default: 500).",
     )
     parser.add_argument("--output", type=Path, help="Optional custom empty directory. Default: runs/current, with automatic history.")
     parser.add_argument("--seed", type=int, default=42)
@@ -157,17 +181,25 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--heldout-episodes", type=int, default=100)
     parser.add_argument("--log-std-init", type=_finite_float, default=-2.0, help="Finite initial Gaussian policy log standard deviation (default: -2).")
     args = parser.parse_args(argv)
-    trial = not args.full_training
-    args.timesteps = args.timesteps if args.timesteps is not None else (DEFAULT_TRIAL_TIMESTEPS if trial else 500_000)
+    trial = args.trial
+    args.full_training = not trial
+    if trial and args.timesteps is None:
+        args.timesteps = DEFAULT_TRIAL_TIMESTEPS
+    explicit_envs = args.envs is not None
     args.envs = args.envs if args.envs is not None else (1 if trial else 8)
     if args.viewer_speed <= 0:
         parser.error("viewer-speed must be positive")
-    if min(args.timesteps, args.envs, args.eval_frequency, args.eval_episodes, args.heldout_episodes) < 1:
+    if (args.timesteps is not None and args.timesteps < 1) or min(args.envs, args.eval_frequency, args.eval_episodes, args.heldout_episodes) < 1:
         parser.error("timesteps, envs and evaluation counts must be positive")
     if trial and args.timesteps < 2:
         parser.error("A startup trial requires at least 2 environment steps before its first network update.")
     if trial and args.envs != 1:
         parser.error("A startup trial uses exactly one environment so its total step budget cannot be multiplied by --envs.")
+    if not trial and args.timesteps is not None and args.timesteps % args.envs:
+        if explicit_envs:
+            parser.error("timesteps must be divisible by envs to stop at the exact total step limit.")
+        args.envs = 1
+        print("Using one environment to respect the exact --timesteps limit.", flush=True)
     try:
         with training_output(args.output) as output:
             _run(args, output)
@@ -183,7 +215,11 @@ def _run(args, output: Path) -> None:
         "algorithm": "PPO",
         "mode": "startup_trial" if trial else "full_training",
         "requested_timesteps": args.timesteps,
-        "environment_step_limit": args.timesteps if trial else None,
+        "environment_step_limit": args.timesteps,
+        "continuous": not trial and args.timesteps is None,
+        "stop_criterion": "first_optimizer_step" if trial else (
+            "manual_interrupt" if args.timesteps is None else "total_environment_steps"
+        ),
         "selected_rollout_budget": args.timesteps if trial else None,
         "trial_stop_criterion": "first_optimizer_step" if trial else None,
         "max_gradient_updates": 1 if trial else None,
@@ -276,6 +312,10 @@ def _run(args, output: Path) -> None:
 
             view_callback = TrainingViewer(speed=args.viewer_speed, progress=progress)
             callback = CallbackList([view_callback, callback]) if callback is not None else view_callback
+        if not trial and args.timesteps is not None:
+            step_limit = _TrainingStepLimit(args.timesteps, config["n_steps"] * args.envs)
+            callbacks = callback.callbacks if isinstance(callback, CallbackList) else [callback]
+            callback = CallbackList([step_limit, *callbacks])
         model = PPO(
             "MlpPolicy",
             vector_env,
@@ -295,8 +335,15 @@ def _run(args, output: Path) -> None:
             verbose=1,
         )
         model.set_logger(configure(str(output), ["stdout", "csv"]))
+        if not trial:
+            target = "continuously" if args.timesteps is None else f"for {args.timesteps:,} environment steps"
+            print(f"Training {target}. Press Ctrl+C or close the viewer to stop and save final_model.zip.", flush=True)
         with _OptimizerStepCounter(model.policy.optimizer, limit=1 if trial else None) as optimizer_counter:
-            model.learn(total_timesteps=args.timesteps, callback=callback, log_interval=1 if trial else 5)
+            model.learn(
+                total_timesteps=math.inf if args.timesteps is None else args.timesteps,
+                callback=callback,
+                log_interval=1 if trial else 5,
+            )
         if trial:
             if optimizer_counter.count != 1:
                 raise RuntimeError("Startup trial ended before its first optimizer step completed.")
@@ -357,15 +404,27 @@ def _run(args, output: Path) -> None:
                   f"mean final distance {summary['mean_final_distance_m'] * 1000:.1f} mm")
         print(f"Training and held-out evaluation saved to {output}")
     except BaseException as exc:
+        interrupted = isinstance(exc, KeyboardInterrupt)
+        checkpoint = None
+        if interrupted and not trial and model is not None:
+            save_checkpoint(
+                model, output / "final_model.zip", signature,
+                {**config, **progress(), "stop_reason": "user_interrupt",
+                 "elapsed_seconds": time.perf_counter() - start_time},
+            )
+            checkpoint = "final_model.zip"
+            print(f"Training interrupted; current model saved to {output / checkpoint}", flush=True)
         write_json(
             output / "training.json",
             {
-                "status": "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
+                "status": "interrupted" if interrupted else "failed",
                 "mode": config["mode"],
                 **({"trial_status": "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"} if trial else {}),
                 "config": config,
                 "environment": signature,
                 **progress(),
+                "stop_reason": "user_interrupt" if interrupted else "error",
+                **({"checkpoint": checkpoint} if checkpoint is not None else {}),
                 "task_performance_evaluated": False,
                 "elapsed_seconds": time.perf_counter() - start_time,
                 "error": f"{type(exc).__name__}: {exc}",

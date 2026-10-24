@@ -72,6 +72,13 @@ class TrainingViewerTests(unittest.TestCase):
         with self.assertRaises(KeyboardInterrupt):
             self.callback._on_step()
 
+    def test_continuous_status_displays_an_unlimited_target(self):
+        self.callback.model._total_timesteps = float("inf")
+        self.callback.num_timesteps = 600_000
+        with patch.object(self.env, "step", side_effect=AssertionError("Observer took an action")), patch("time.sleep"):
+            self.assertTrue(self.callback._on_step())
+        self.assertIn("Training steps: 600,000/unlimited", self.output.getvalue())
+
     def test_end_closes_window_and_reports_actual_update_count(self):
         viewer = self.callback.viewer
         self.callback._on_rollout_end()

@@ -1,6 +1,7 @@
 """Observe actual training states without taking actions or editing training physics."""
 
 import copy
+import math
 import time
 
 import mujoco
@@ -57,7 +58,9 @@ class TrainingViewer(BaseCallback):
             info = self.locals.get("infos", [{}])[0]
             distance = info.get("distance", float("nan")) * 1000
             updates = self.progress().get("optimizer_steps", 0)
-            print(f"Training steps: {self.num_timesteps}/{self.model._total_timesteps} | "
+            total = self.model._total_timesteps
+            target = f"{total:,}" if math.isfinite(total) else "unlimited"
+            print(f"Training steps: {self.num_timesteps:,}/{target} | "
                   f"env 0 episodes: {self.episodes} | distance: {distance:.1f} mm | "
                   f"network updates: {updates}", flush=True)
             self.last_status = now
