@@ -21,6 +21,7 @@ from stable_baselines3 import PPO
 import torch
 
 from .env import SO101ReachEnv
+from .outputs import OutputError, archive_evaluation, current_checkpoint, current_output, evaluation_output
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -280,15 +281,22 @@ def evaluate_checkpoint(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--checkpoint", type=Path, help="Checkpoint to inspect (default: current best or startup policy in runs/current).")
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--seed", type=int, default=20_000)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--render", action="store_true", help="Play trained-policy episodes at real time in MuJoCo.")
     args = parser.parse_args()
-    report = evaluate_checkpoint(args.checkpoint, episodes=args.episodes, seed=args.seed, render=args.render)
-    output = args.output or args.checkpoint.with_suffix(".evaluation.json")
-    write_json(output, report)
+    try:
+        with evaluation_output(args.output) as output:
+            checkpoint = args.checkpoint or current_checkpoint()
+            report = evaluate_checkpoint(checkpoint, episodes=args.episodes, seed=args.seed, render=args.render)
+            if checkpoint.resolve().is_relative_to(current_output().resolve()):
+                report["checkpoint"] = str(checkpoint.resolve().relative_to(current_output().resolve()))
+            archive_evaluation(output)
+            write_json(output, report)
+    except OutputError as exc:
+        parser.error(str(exc))
     for policy, result in report["results"].items():
         summary = result["summary"]
         print(f"{policy}: success={summary['successes']}/{summary['episodes']} "

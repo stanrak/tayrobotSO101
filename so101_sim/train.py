@@ -19,6 +19,7 @@ import torch
 
 from .env import SO101ReachEnv
 from .evaluate import environment_signature, evaluate_checkpoint, run_episodes, save_checkpoint, write_json
+from .outputs import OutputError, training_output
 
 
 DEFAULT_TRIAL_TIMESTEPS = 500
@@ -146,7 +147,7 @@ def main(argv: list[str] | None = None) -> None:
         "--timesteps", type=int,
         help="Startup rollout budget until the first network update (at least 2; default: 500), or total transitions with --full-training (default: 500000).",
     )
-    parser.add_argument("--output", type=Path, help="Fresh output directory (default: runs/startup_trial or runs/reach).")
+    parser.add_argument("--output", type=Path, help="Optional custom empty directory. Default: runs/current, with automatic history.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--viewer", "--render", action="store_true", help="Watch actual training in a live MuJoCo viewer (environment 0).")
     parser.add_argument("--viewer-speed", type=_finite_float, default=1.0, help="Viewer simulation speed multiplier (default: 1, real time).")
@@ -159,7 +160,6 @@ def main(argv: list[str] | None = None) -> None:
     trial = not args.full_training
     args.timesteps = args.timesteps if args.timesteps is not None else (DEFAULT_TRIAL_TIMESTEPS if trial else 500_000)
     args.envs = args.envs if args.envs is not None else (1 if trial else 8)
-    args.output = args.output or Path("runs/startup_trial" if trial else "runs/reach")
     if args.viewer_speed <= 0:
         parser.error("viewer-speed must be positive")
     if min(args.timesteps, args.envs, args.eval_frequency, args.eval_episodes, args.heldout_episodes) < 1:
@@ -168,10 +168,15 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("A startup trial requires at least 2 environment steps before its first network update.")
     if trial and args.envs != 1:
         parser.error("A startup trial uses exactly one environment so its total step budget cannot be multiplied by --envs.")
-    output = args.output.resolve()
-    if any(output.glob("*.zip")) or (output / "training.json").exists():
-        parser.error(f"Output contains an existing run; choose a fresh --output directory: {output}")
-    output.mkdir(parents=True, exist_ok=True)
+    try:
+        with training_output(args.output) as output:
+            _run(args, output)
+    except OutputError as exc:
+        parser.error(str(exc))
+
+
+def _run(args, output: Path) -> None:
+    trial = not args.full_training
     torch.set_num_threads(1)
     torch.use_deterministic_algorithms(True)
     config = {
@@ -329,6 +334,7 @@ def main(argv: list[str] | None = None) -> None:
         save_checkpoint(model, output / "final_model.zip", signature, evaluation_callback.training_metadata())
         training_seconds = time.perf_counter() - start_time
         report = evaluate_checkpoint(output / "best_model.zip", episodes=args.heldout_episodes, seed=20_000)
+        report["checkpoint"] = "best_model.zip"
         write_json(output / "evaluation.json", report)
         write_json(
             output / "training.json",
@@ -368,6 +374,9 @@ def main(argv: list[str] | None = None) -> None:
         raise
     finally:
         vector_env.close()
+        logger = getattr(model, "logger", None)
+        if logger is not None:
+            logger.close()
         if view_callback is not None:
             view_callback.close()
         if evaluation_callback is not None:

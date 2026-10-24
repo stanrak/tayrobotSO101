@@ -84,16 +84,45 @@ Current work is limited to code, the initial simulation environment, and a start
 For example, a task needing 2048 initial transitions can use:
 
 ```powershell
-python -m so101_sim.train --timesteps 2048 --output runs/startup_trial --seed 42
+.\.venv\Scripts\python -m so101_sim.train --timesteps 2048 --seed 42
 ```
 
 The agent must choose and explain a suitable initial budget before a real trial. The current PPO startup mode uses one environment, collects exactly the requested number of transitions (at least two), then performs one optimization epoch with the complete rollout as one batch. This produces exactly one optimizer step. An actual optimizer-call counter prevents a second update; a completed episode, rollout, or set of epochs is not used as a substitute for counting network updates.
 
-The trial does not add validation episodes, comparison baselines, checkpoint selection, or an old policy. Its metadata records the selected step budget, actual transitions, actual optimizer steps, and stopping reason. This is a startup diagnostic, not evidence that the task has been learned. A new trial requires a fresh output directory and must remain within the authorized work.
+The trial does not add validation episodes, comparison baselines, checkpoint selection, or an old policy. Its metadata records the selected step budget, actual transitions, actual optimizer steps, and stopping reason. This is a startup diagnostic, not evidence that the task has been learned. Each authorized trial uses the same managed output location and starts a fresh policy.
 
 Continuing beyond the first network update requires a later explicit user request and the `--full-training` mode. Choosing more initial transitions does not require that flag and does not authorize further updates. Neither the manual launcher nor code and documentation changes automatically start training.
 
 Only the policy's sampled actions control the robot during a trial. There is no IK solver, scripted reach controller, or teacher that performs the task for the policy. The environment initializes the robot and samples reachable Cartesian targets using forward kinematics on separate scratch simulation data. The generating joint angles are withheld from the policy and never become control commands.
+
+## One output location for every run
+
+Both startup trials and full training, with or without a viewer, write to **`runs/current/`**. Omit `--output` in normal use. Changing the seed, step count, viewer setting, or task code does not require another output path.
+
+Before a new training run, the previous `runs/current` folder is moved intact to `runs/history/<UTC timestamp>/`. Checkpoints, metadata, and logs are retained together. A failed or interrupted run is retained in the same way. Starting another run initializes a new policy; keeping a stable output location does not resume an old checkpoint or bypass compatibility checks.
+
+Earlier outputs from development have been grouped under `runs/history/legacy/`, with their original bytes verified unchanged. The most recent completed startup trial was placed in `runs/current` so the stable location is already available.
+
+The main files are:
+
+| Location | Contents |
+| --- | --- |
+| `runs/current/training.json` | Current run settings, status, and actual network updates |
+| `runs/current/progress.csv` | Current training metrics |
+| `runs/current/trial_model.zip` | Policy after the startup trial's first update |
+| `runs/current/best_model.zip` | Best validation policy from full training |
+| `runs/current/evaluation.json` | Latest evaluation report |
+| `runs/history/` | Previous runs, automatically retained |
+
+To view the current policy without specifying a checkpoint path:
+
+```powershell
+.\.venv\Scripts\python -m so101_sim.evaluate --render --episodes 5
+```
+
+The evaluator selects the current full-training best policy or startup trial policy. It writes its report to `runs/current/evaluation.json`; older reports are kept in `runs/current/evaluation_history/`. Finish or stop the current training before evaluating it separately. The live training viewer remains the way to watch an active run.
+
+Output locking prevents simultaneous writers from rotating or overwriting an active run. The small `runs/.current.lock` file remains after exit; the operating system releases its lock automatically, including after a crash. Do not delete it to bypass another running process. An optional `--output` still accepts a custom empty destination, and `--checkpoint` still accepts an explicit historical model for evaluation.
 
 ## Watch training as it happens
 
@@ -102,16 +131,16 @@ Add `--viewer` (also accepted as `--render`) to observe the robot during the act
 Watch a startup trial that stops after the first network update:
 
 ```powershell
-.\.venv\Scripts\python -m so101_sim.train --viewer --timesteps 500 --output runs/trial_view_01 --seed 42
+.\.venv\Scripts\python -m so101_sim.train --viewer --timesteps 500 --seed 42
 ```
 
 For a user-started full training run with a live viewer:
 
 ```powershell
-.\.venv\Scripts\python -m so101_sim.train --full-training --viewer --timesteps 300000 --output runs/train_view_01 --seed 42
+.\.venv\Scripts\python -m so101_sim.train --full-training --viewer --timesteps 300000 --seed 42
 ```
 
-Omit `--viewer` to train without a graphics window. Use a new output directory for each run. The viewer option must be supplied when starting the run; it does not attach to an already running headless process.
+Omit `--viewer` to train without a graphics window. Both modes use `runs/current`. The viewer option must be supplied when starting the run; it does not attach to an already running headless process.
 
 By default the observed environment is paced at real time. `--viewer-speed 4` displays it at four times simulation speed. Display pacing slows wall-clock training but does not alter physics time, policy actions, or update budgets. With multiple environments, only environment 0 is displayed. During network optimization or validation the robot display may remain still while terminal messages show the training phase.
 
@@ -144,6 +173,7 @@ Earlier long-run checkpoints and reports remain under `checkpoints/first_reach/`
 | `so101_sim/env.py` | Initial robot environment and task |
 | `so101_sim/train.py` | Trial through the first network update and explicit full training mode |
 | `assets/robotstudio_so101/` | Unmodified upstream robot assets |
-| `runs/` | Ignored local diagnostic outputs |
+| `runs/current/` | Stable current training and evaluation outputs |
+| `runs/history/` | Automatically retained earlier runs |
 
 Read `AGENTS.md` and every local file in `instructions` before repository work. Agent-maintained guidance belongs in English in `instructions/instruction.md`. The user-owned Vietnamese file `instructions/huongdan.md` must stay unchanged and excluded from Git.

@@ -13,3 +13,10 @@
 
 - Do not modify `AGENTS.md`.
 - Write agent-maintained guidance inside the `instructions` folder. These instruction files may be versioned in Git.
+
+## Output locations
+
+- Use the managed default `runs/current` for startup trials, full training, and evaluation reports. Ordinary commands and examples must not require a new `--output` path for each run, viewer setting, or task change.
+- The output manager archives the complete previous run under `runs/history` before a new training run. Preserve checkpoint bytes, metadata, and logs; do not automatically delete history, load archived policies, or migrate incompatible checkpoints.
+- Default evaluation finds the current checkpoint automatically. Existing reports are retained under the current run's `evaluation_history` folder before replacement.
+- Respect output writer locks. Do not rotate an active run or bypass its lock to start another writer. This output organization does not authorize training or evaluation beyond the scope above.

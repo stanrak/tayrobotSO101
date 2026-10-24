@@ -14,6 +14,7 @@ import gymnasium as gym
 import numpy as np
 
 from so101_sim import train
+from so101_sim import outputs
 
 
 class CountingEnvironment(gym.Env):
@@ -127,6 +128,7 @@ class StartupTrialTests(unittest.TestCase):
         self.assertTrue(all(env.closed for env in CountingEnvironment.instances))
         model = RolloutRoundingPPO.instances[0]
         self.assertEqual(model.env.num_envs, 1)
+        model.logger.close.assert_called_once()
         self.assertEqual(model.kwargs["n_steps"], 500)
         self.assertEqual(model.callback_calls, 0)
         self.assertEqual(model._n_updates, 1)
@@ -165,6 +167,18 @@ class StartupTrialTests(unittest.TestCase):
         validation.assert_not_called()
         evaluate.assert_not_called()
         episodes.assert_not_called()
+
+    def test_default_output_can_be_reused_after_task_settings_change(self):
+        with patch.object(outputs, "RUNS_ROOT", Path(self.temporary.name) / "managed"):
+            self.output = outputs.current_output()
+            self.run_fake_trial("--timesteps", "23")
+            first_report = (self.output / "training.json").read_bytes()
+            self.run_fake_trial("--timesteps", "37", "--seed", "7")
+            current = json.loads((self.output / "training.json").read_text())
+            self.assertEqual(current["actual_timesteps"], 37)
+            self.assertEqual(current["config"]["seed"], 7)
+            archive = next((outputs.RUNS_ROOT / "history").iterdir())
+            self.assertEqual((archive / "training.json").read_bytes(), first_report)
 
     def test_two_step_minimum_budget_still_completes_one_network_update(self):
         self.run_fake_trial("--timesteps", "2")
