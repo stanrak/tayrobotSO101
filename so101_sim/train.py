@@ -171,7 +171,7 @@ def main(argv: list[str] | None = None) -> None:
         "--timesteps", type=int,
         help="Stop after this many total training transitions (default: unlimited). With --trial: rollout budget before the first network update (at least 2; default: 500).",
     )
-    parser.add_argument("--output", type=Path, help="Optional custom empty directory. Default: runs/current, with automatic history.")
+    parser.add_argument("--output", type=Path, help="Optional custom empty directory. Default: a new experiment directory under runs/experiments for every invocation.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--viewer", "--render", action="store_true", help="Watch actual training in a live MuJoCo viewer (environment 0).")
     parser.add_argument("--viewer-speed", type=_finite_float, default=1.0, help="Viewer simulation speed multiplier (default: 1, real time).")
@@ -201,7 +201,9 @@ def main(argv: list[str] | None = None) -> None:
         args.envs = 1
         print("Using one environment to respect the exact --timesteps limit.", flush=True)
     try:
-        with training_output(args.output) as output:
+        with training_output(
+            args.output, mode="startup_trial" if trial else "full_training", seed=args.seed,
+        ) as output:
             _run(args, output)
     except OutputError as exc:
         parser.error(str(exc))

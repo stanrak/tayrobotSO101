@@ -21,7 +21,7 @@ from stable_baselines3 import PPO
 import torch
 
 from .env import SO101ReachEnv
-from .outputs import OutputError, archive_evaluation, current_checkpoint, current_output, evaluation_output
+from .outputs import OutputError, current_checkpoint, evaluation_output
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -278,19 +278,19 @@ def evaluate_checkpoint(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, help="Checkpoint to inspect (default: current best or startup policy in runs/current).")
+    parser.add_argument("--checkpoint", type=Path, help="Checkpoint to inspect (default: latest managed experiment, with legacy runs/current fallback).")
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--seed", type=int, default=20_000)
-    parser.add_argument("--output", type=Path)
+    parser.add_argument("--output", type=Path, help="Optional new report file; existing files are rejected. Default: a unique evaluation directory next to the checkpoint.")
     parser.add_argument("--render", action="store_true", help="Play trained-policy episodes at real time in MuJoCo.")
     args = parser.parse_args()
     try:
-        with evaluation_output(args.output) as output:
-            checkpoint = args.checkpoint or current_checkpoint()
+        with evaluation_output(args.output, checkpoint=args.checkpoint, seed=args.seed) as output:
+            checkpoint = (args.checkpoint or current_checkpoint()).resolve()
+            if checkpoint.suffix != ".zip":
+                checkpoint = checkpoint.with_suffix(".zip")
             report = evaluate_checkpoint(checkpoint, episodes=args.episodes, seed=args.seed, render=args.render)
-            if checkpoint.resolve().is_relative_to(current_output().resolve()):
-                report["checkpoint"] = str(checkpoint.resolve().relative_to(current_output().resolve()))
-            archive_evaluation(output)
+            report["checkpoint"] = str(checkpoint)
             write_json(output, report)
     except OutputError as exc:
         parser.error(str(exc))

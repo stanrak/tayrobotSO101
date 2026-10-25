@@ -90,9 +90,14 @@ class EvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "environment mismatch: task_config"):
             load_checked_policy(self.checkpoint, self.env)
 
-    def test_historical_floating_target_policy_is_rejected_without_migration(self):
-        historical = Path(__file__).resolve().parents[1] / "checkpoints/first_reach/best_model.zip"
+    def test_older_task_policy_is_rejected_without_migration(self):
+        # Build a local old-task fixture; generated historical checkpoints are
+        # deliberately excluded from Git and absent in a clean checkout.
+        historical = self.checkpoint
         metadata = metadata_path(historical)
+        old_metadata = json.loads(metadata.read_text(encoding="utf-8"))
+        old_metadata["environment"]["task_config"]["task"] = "SO101LocalReach-v1"
+        metadata.write_text(json.dumps(old_metadata), encoding="utf-8")
         original_checkpoint = historical.read_bytes()
         original_metadata = metadata.read_bytes()
         with patch("so101_sim.evaluate.PPO.load") as load:

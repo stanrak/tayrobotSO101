@@ -3,5 +3,11 @@ instructions/huongdan.md
 
 __pycache__/
 *.py[cod]
+.*.lock
 .venv/
 runs/
+checkpoints/
+reports/
+docs/first_reach.gif
+docs/successful_reach.gif
+tests/

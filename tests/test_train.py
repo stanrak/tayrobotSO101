@@ -132,8 +132,27 @@ class StartupTrialTests(unittest.TestCase):
         self.temporary = TemporaryDirectory(prefix="so101-startup-test-")
         self.addCleanup(self.temporary.cleanup)
         self.output = Path(self.temporary.name) / "trial"
+        output_root = patch.object(outputs, "RUNS_ROOT", Path(self.temporary.name) / "runs")
+        output_root.start()
+        self.addCleanup(output_root.stop)
 
-    def run_fake_trial(self, *options):
+    def test_training_output_receives_run_mode_and_seed(self):
+        for options, mode, seed in (
+            (["--trial", "--seed", "7"], "startup_trial", 7),
+            ([], "full_training", 42),
+            (["--full-training", "--seed", "11"], "full_training", 11),
+        ):
+            with (
+                self.subTest(options=options),
+                patch.object(train, "training_output") as destination,
+                patch.object(train, "_run") as run,
+            ):
+                destination.return_value.__enter__.return_value = self.output
+                train.main(options)
+                destination.assert_called_once_with(None, mode=mode, seed=seed)
+                self.assertEqual(run.call_args.args[1], self.output)
+
+    def run_fake_trial(self, *options, managed=False):
         def inspect_checkpoint(model, *args):
             self.assertIs(model.policy.optimizer.step.__func__, CountingOptimizer.step)
 
@@ -147,7 +166,8 @@ class StartupTrialTests(unittest.TestCase):
             evaluate = stack.enter_context(patch.object(train, "evaluate_checkpoint"))
             episodes = stack.enter_context(patch.object(train, "run_episodes"))
             stack.enter_context(redirect_stdout(io.StringIO()))
-            train.main(["--trial", "--output", str(self.output), *options])
+            output_options = [] if managed else ["--output", str(self.output)]
+            train.main(["--trial", *output_options, *options])
         return checkpoint, validation, evaluate, episodes
 
     @contextmanager
@@ -219,17 +239,22 @@ class StartupTrialTests(unittest.TestCase):
         evaluate.assert_not_called()
         episodes.assert_not_called()
 
-    def test_default_output_can_be_reused_after_task_settings_change(self):
+    def test_default_runs_have_unique_paths_and_keep_prior_results(self):
         with patch.object(outputs, "RUNS_ROOT", Path(self.temporary.name) / "managed"):
-            self.output = outputs.current_output()
-            self.run_fake_trial("--timesteps", "23")
-            first_report = (self.output / "training.json").read_bytes()
-            self.run_fake_trial("--timesteps", "37", "--seed", "7")
-            current = json.loads((self.output / "training.json").read_text())
+            self.run_fake_trial("--timesteps", "23", managed=True)
+            first_output = outputs.current_output()
+            first_report = (first_output / "training.json").read_bytes()
+            self.run_fake_trial("--timesteps", "37", "--seed", "7", managed=True)
+            second_output = outputs.current_output()
+            self.assertNotEqual(first_output, second_output)
+            self.assertEqual(first_output.parent, outputs.RUNS_ROOT / "experiments")
+            self.assertEqual(second_output.parent, first_output.parent)
+            current = json.loads((second_output / "training.json").read_text())
             self.assertEqual(current["actual_timesteps"], 37)
             self.assertEqual(current["config"]["seed"], 7)
-            archive = next((outputs.RUNS_ROOT / "history").iterdir())
-            self.assertEqual((archive / "training.json").read_bytes(), first_report)
+            self.assertEqual((first_output / "training.json").read_bytes(), first_report)
+            self.assertTrue((outputs.RUNS_ROOT / "latest.json").is_file())
+            self.assertFalse((outputs.RUNS_ROOT / "history").exists())
 
     def test_two_step_minimum_budget_still_completes_one_network_update(self):
         self.run_fake_trial("--timesteps", "2")

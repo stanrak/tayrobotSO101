@@ -89,41 +89,53 @@ For example, a task needing 2048 initial transitions can use:
 
 The agent must choose and explain a suitable initial budget before a real trial. The current PPO startup mode uses one environment, collects exactly the requested number of transitions (at least two), then performs one optimization epoch with the complete rollout as one batch. This produces exactly one optimizer step. An actual optimizer-call counter prevents a second update; a completed episode, rollout, or set of epochs is not used as a substitute for counting network updates.
 
-The trial does not add validation episodes, comparison baselines, checkpoint selection, or an old policy. Its metadata records the selected step budget, actual transitions, actual optimizer steps, and stopping reason. This is a startup diagnostic, not evidence that the task has been learned. Each authorized trial uses the same managed output location and starts a fresh policy.
+The trial does not add validation episodes, comparison baselines, checkpoint selection, or an old policy. Its metadata records the selected step budget, actual transitions, actual optimizer steps, and stopping reason. This is a startup diagnostic, not evidence that the task has been learned. Each authorized trial creates a separate experiment under the managed `runs/` root and starts a fresh policy.
 
 Agents must use `--trial` for authorized startup checks. Continuing beyond the first network update requires explicit user authorization to run training. Choosing more initial transitions with `--trial` does not authorize further updates. Neither the manual launcher nor code and documentation changes automatically start training.
 
 Only the policy's sampled actions control the robot during a trial. There is no IK solver, scripted reach controller, or teacher that performs the task for the policy. The environment verifies reachable ball positions using forward kinematics on separate scratch simulation data. Sampling never generates robot actions, and its generating joint angles are withheld from observations, info, and controls.
 
-## One output location for every run
+## Separate experiment records for every run
 
-Both startup trials and full training, with or without a viewer, write to **`runs/current/`**. Omit `--output` in normal use. Changing the seed, step count, viewer setting, or task code does not require another output path.
+Both startup trials and full training automatically create **`runs/experiments/<UTC timestamp>_<mode>_seed<seed>_<unique suffix>/`**. Omit `--output` in normal use: every invocation receives a different directory, including runs with identical settings or timestamps. Existing experiments stay at their original paths; starting another run never moves, deletes, or overwrites them.
 
-Before a new training run, the previous `runs/current` folder is moved intact to `runs/history/<UTC timestamp>/`. Checkpoints, metadata, and logs are retained together. A failed or interrupted run is retained in the same way. Starting another run initializes a new policy; keeping a stable output location does not resume an old checkpoint or bypass compatibility checks.
+Each experiment records the command, seed, timestamps, status, Python/platform/package versions, Git commit and dirty flag, source file SHA256 hashes, and an exact source/config snapshot. `training.json` retains the full hyperparameters, environment signature, requested/actual transitions, and actual optimizer steps. Checkpoints, per-environment episode logs, progress metrics, and any measured evaluation results stay together. Failed and interrupted runs are retained with their observed status; an abrupt process kill may leave the last recorded running status and partial logs.
 
-Earlier outputs from development have been grouped under `runs/history/legacy/`, with their original bytes verified unchanged. The most recent completed startup trial was placed in `runs/current` so the stable location is already available.
+`runs/latest.json` points to the most recently started managed training experiment; it is a convenience pointer, not the experiment data. Evaluation can still find the latest checkpoint automatically. Existing `runs/current/`, `runs/history/`, and other saved run folders are preserved without relocation. When no latest pointer exists, checkpoint lookup falls back to the legacy `runs/current/` directory. Starting a new run always initializes a fresh policy and keeps compatibility checks.
 
 The main files are:
 
 | Location | Contents |
 | --- | --- |
-| `runs/current/training.json` | Current run settings, status, and actual network updates |
-| `runs/current/progress.csv` | Current training metrics |
-| `runs/current/trial_model.zip` | Policy after the startup trial's first update |
-| `runs/current/best_model.zip` | Best validation policy from full training |
-| `runs/current/final_model.zip` | Current policy saved on Ctrl+C, viewer closure, or the requested step limit |
-| `runs/current/evaluation.json` | Latest evaluation report |
-| `runs/history/` | Previous runs, automatically retained |
+| `runs/experiments/<run_id>/run.json` | Identity, provenance, source hashes, final status, and observed counts |
+| `runs/experiments/<run_id>/source/` | Exact source/config snapshot used at run start |
+| `runs/experiments/<run_id>/training.json` | Hyperparameters, environment, status, and actual network updates |
+| `runs/experiments/<run_id>/progress.csv`, `monitor_*.csv` | Training metrics and episode records |
+| `runs/experiments/<run_id>/*_model.zip` and matching metadata | Startup, best-validation, and final policies |
+| `runs/experiments/<run_id>/evaluation.json` | Held-out report produced by a completed full training run, when measured |
+| `<checkpoint directory>/evaluations/<evaluation_id>/` | Separate report and provenance for each standalone evaluation invocation |
+| `runs/index.csv` | Rebuildable comparison table covering new and legacy runs |
+| `runs/latest.json` | Pointer used by default checkpoint lookup |
 
-To view the current policy without specifying a checkpoint path:
+To rebuild and view comparisons from saved records without running a policy:
+
+```powershell
+.\.venv\Scripts\python -m so101_sim.experiments
+```
+
+Open `runs/index.csv` in a spreadsheet to compare seeds, task/environment/source fingerprints, code revisions, hyperparameters, step budgets, optimizer counts, duration, success rate, return, and final distance. Each evaluation row identifies its checkpoint hash and evaluation seeds. Compare matching task/environment signatures, evaluation seeds, and budgets; validation, held-out, and standalone results are labeled separately. Empty metrics mean they were not measured. A startup trial has no task-performance score, and a short diagnostic must not be ranked as a learned policy. The index is derived and can be regenerated; raw experiment files are retained.
+
+To evaluate and view the latest policy without specifying a checkpoint path:
 
 ```powershell
 .\.venv\Scripts\python -m so101_sim.evaluate --render --episodes 5
 ```
 
-The evaluator selects the current full-training best policy or startup trial policy. It writes its report to `runs/current/evaluation.json`; older reports are kept in `runs/current/evaluation_history/`. Finish or stop the current training before evaluating it separately. The live training viewer remains the way to watch an active run.
+The evaluator selects the latest full-training best policy, startup trial policy, or final policy. Every invocation writes a new `evaluations/<evaluation_id>/evaluation.json` next to the checkpoint, with its own `run.json` and source snapshot. Reports identify the checkpoint by absolute path and SHA256. Existing reports remain unchanged, including evaluations of historical checkpoints. Finish or stop the current training before evaluating it separately. The live training viewer remains the way to watch an active run.
 
-Output locking prevents simultaneous writers from rotating or overwriting an active run. The small `runs/.current.lock` file remains after exit; the operating system releases its lock automatically, including after a crash. Do not delete it to bypass another running process. An optional `--output` still accepts a custom empty destination, and `--checkpoint` still accepts an explicit historical model for evaluation.
+Output locking prevents simultaneous training, standalone evaluation, or catalog rebuild writers. The existing `runs/.current.lock` name is retained so an older running process remains protected; the operating system releases its lock automatically, including after a crash. Do not delete it to bypass another running process. Training `--output` accepts a custom empty directory; an existing experiment is rejected. Evaluation `--output` accepts a new report file and also retains a canonical copy/provenance under the checkpoint's `evaluations/` directory; existing files are rejected. Custom training folders outside `runs/` are not in the default index; use `python -m so101_sim.experiments --root <parent>` to compare them.
+
+Run results stay local: `.gitignore` excludes `runs/`, historical `checkpoints/` and `reports/`, and generated learning GIFs. Every new experiment also contains an ignore marker, protecting custom output folders from ordinary `git add`. Previously tracked result files are removed from the Git index without deleting the local copies. Static simulation illustrations remain documentation assets. Do not force-add experimental outputs or rewrite Git history as part of ordinary runs.
 
 ## Run training continuously or with a step limit
 
@@ -133,7 +145,7 @@ Run training without a graphics window:
 .\.venv\Scripts\python -m so101_sim.train
 ```
 
-Training continues until Ctrl+C. There is no default total step limit. The existing `--full-training` flag is still accepted as an alias for this default mode. Every new invocation starts a fresh policy and uses the existing output history mechanism.
+Training continues until Ctrl+C. There is no default total step limit. The existing `--full-training` flag is still accepted as an alias for this default mode. Every new invocation starts a fresh policy in its own experiment directory.
 
 Add `--viewer` (also accepted as `--render`) to observe the robot during the actual training rollout. The window shows environment 0; the terminal reports total transitions across all environments, the observed episode count, distance to the target, and completed optimizer steps. It also announces when a rollout ends and network optimization begins.
 
@@ -157,11 +169,11 @@ For a startup diagnostic ending at the first optimizer step, use the explicit tr
 .\.venv\Scripts\python -m so101_sim.train --trial --viewer --timesteps 500 --seed 42
 ```
 
-Omit `--viewer` from any command to run without a graphics window. All modes use `runs/current`. The viewer option must be supplied when starting the run; it does not attach to an already running headless process. The terminal displays `unlimited` as the target during continuous training.
+Omit `--viewer` from any command to run without a graphics window. All modes create separate records under `runs/experiments/`. The viewer option must be supplied when starting the run; it does not attach to an already running headless process. The terminal displays `unlimited` as the target during continuous training.
 
 By default the observed environment is paced at real time. `--viewer-speed 4` displays it at four times simulation speed. Display pacing slows wall-clock training but does not alter physics time, policy actions, or update budgets. With multiple environments, only environment 0 is displayed. During network optimization or validation the robot display may remain still while terminal messages show the training phase.
 
-Mouse camera controls remain available. The viewer uses separate copies of the training model and data, so viewer physics controls cannot modify the robot used for learning. No keyboard task controller, scripted solver, or extra policy rollout is used. Close the viewer window or press Ctrl+C in the terminal to interrupt training. Full training saves the current policy to `runs/current/final_model.zip` with actual step and optimizer counts, records the interrupted status, and skips final evaluation. At a requested step limit, the viewer closes and full training completes its normal checkpoint evaluation.
+Mouse camera controls remain available. The viewer uses separate copies of the training model and data, so viewer physics controls cannot modify the robot used for learning. No keyboard task controller, scripted solver, or extra policy rollout is used. Close the viewer window or press Ctrl+C in the terminal to interrupt training. Full training saves `final_model.zip` inside that run's experiment directory with actual step and optimizer counts, records the interrupted status, and skips final evaluation. At a requested step limit, the viewer closes and full training completes its normal checkpoint evaluation.
 
 ## Desk, physical ball, and learning environment
 
@@ -202,7 +214,7 @@ python scripts/fetch_model.py --verify
 
 Tests cover keyboard mappings and real MuJoCo movement through a simulated viewer, pause/reset behavior, reachable supported ball placement, target persistence through automatic resets, exact target step budgets, gravitational falls, friction, drops from the desk edge, moving-goal observations, task contracts, model and checkpoint integrity, continuous training interruption, exact step limits, and the first-update stopping rule. Unit tests for training use fake counters rather than real training rollouts. A visible GUI still needs a manual keyboard check on the laptop.
 
-Earlier long-run checkpoints and reports remain under `checkpoints/first_reach/` and `reports/first_reach/` as historical artifacts. Starting the application or a startup trial does not replay or continue those experiments. Checkpoint compatibility checks remain in place; no model or checkpoint migration is performed by the launcher.
+Earlier long-run checkpoints and reports already on this laptop remain under `checkpoints/first_reach/` and `reports/first_reach/` as local historical artifacts excluded from Git; a clean clone does not contain them. Starting the application or a startup trial does not replay or continue those experiments. Checkpoint compatibility checks remain in place; no model or checkpoint migration is performed by the launcher.
 
 | Path | Purpose |
 | --- | --- |
@@ -212,7 +224,9 @@ Earlier long-run checkpoints and reports remain under `checkpoints/first_reach/`
 | `so101_sim/env.py` | Initial robot environment and task |
 | `so101_sim/train.py` | Continuous training, optional step limit, and explicit first-update trial |
 | `assets/robotstudio_so101/` | Unmodified upstream robot assets |
-| `runs/current/` | Stable current training and evaluation outputs |
-| `runs/history/` | Automatically retained earlier runs |
+| `so101_sim/experiments.py` | Experiment provenance and saved-result comparisons |
+| `runs/experiments/` | Separate training records and nested evaluation records |
+| `runs/index.csv`, `runs/latest.json` | Comparison table and latest-run discovery |
+| `runs/current/`, `runs/history/` | Preserved local legacy outputs |
 
 Read `AGENTS.md` and every local file in `instructions` before repository work. Agent-maintained guidance belongs in English in `instructions/instruction.md`. The user-owned Vietnamese file `instructions/huongdan.md` must stay unchanged and excluded from Git.

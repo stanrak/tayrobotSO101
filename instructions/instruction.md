@@ -17,10 +17,12 @@
 
 ## Output locations
 
-- Use the managed default `runs/current` for startup trials, full training, and evaluation reports. Ordinary commands and examples must not require a new `--output` path for each run, viewer setting, or task change.
-- The output manager archives the complete previous run under `runs/history` before a new training run. Preserve checkpoint bytes, metadata, and logs; do not automatically delete history, load archived policies, or migrate incompatible checkpoints.
-- Default evaluation finds the current checkpoint automatically. Existing reports are retained under the current run's `evaluation_history` folder before replacement.
-- Respect output writer locks. Do not rotate an active run or bypass its lock to start another writer. This output organization does not authorize training or evaluation beyond the scope above.
+- Each startup trial/full training invocation creates a unique `runs/experiments/<UTC timestamp>_<mode>_seed<seed>_<unique suffix>/` directory automatically. Ordinary commands omit `--output`; never reuse, move, or delete older experiment directories. Existing `runs/current`, `runs/history`, and other legacy records stay in place with their original bytes. A custom training output must be empty.
+- Record `run.json` provenance (command, seed, timestamps/status, Python/platform/packages, Git revision/dirty state, source hashes) and an exact allowlisted source/config snapshot, alongside the existing training settings, environment signatures, checkpoints, metrics, and actual transition/optimizer counts. Retain partial, failed, and interrupted runs accurately. No automatic policy loading or checkpoint migration is authorized.
+- `runs/latest.json` is an atomic convenience pointer to the latest managed training run; default checkpoint lookup follows it, falling back to legacy `runs/current` only when the pointer is absent. Invalid pointers must fail clearly. Each standalone evaluation has its own `evaluations/<evaluation_id>/` record next to its checkpoint; existing reports/custom output files must not be overwritten.
+- Maintain derived `runs/index.csv` comparisons from saved metadata, including legacy runs. Label held-out, validation, and standalone metrics separately; leave unmeasured fields blank and never assign learned task-performance scores to startup diagnostics. `python -m so101_sim.experiments` rebuilds the catalog without loading or rolling out policies. Compare matching tasks/environment signatures, evaluation seeds, and budgets.
+- Keep run results out of Git: ignore `runs/`, historical `checkpoints/`/`reports/`, and generated learning GIFs. Each new experiment must include a local ignore marker to cover custom output folders. Remove previously tracked result artifacts from the Git index without deleting their local bytes; ordinary runs do not rewrite commit history. Static simulation documentation images may remain versioned.
+- Respect output writer locks, including the existing `runs/.current.lock` for compatibility with active older processes. Do not bypass locks or mutate an active run. This output organization does not authorize training/evaluation beyond the scope above, and does not require a new dependency or tracking service.
 
 ## Fixed physical workspace contract
 
