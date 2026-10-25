@@ -30,10 +30,7 @@ class TrainingViewer(BaseCallback):
             self.view_model, self.view_data, show_left_ui=False, show_right_ui=False,
         )
         with self.viewer.lock():
-            self.viewer.cam.lookat[:] = [0.17, 0, 0.17]
-            self.viewer.cam.distance = 0.8
-            self.viewer.cam.azimuth = 135
-            self.viewer.cam.elevation = -25
+            self.observed.configure_camera(self.viewer.cam)
         self.next_frame = time.monotonic()
         print("Live training: observing environment 0. Camera controls only; close the window to stop training.", flush=True)
 

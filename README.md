@@ -31,12 +31,12 @@ The launcher uses `.venv\Scripts\python.exe` when present, otherwise `python` fr
 | Y / H | Gripper opening angle |
 | Space | Pause / resume simulation |
 | Backspace | Move joint targets smoothly back to the initial pose |
-| N | Reset the initial pose and sample a new target |
+| N | Reset the initial pose and place the ball at a new table/floor position |
 | Escape | Close the simulation |
 
 Use plain keys without Ctrl or Alt; no numeric keypad is required. Press repeatedly: each press changes its joint target by 2 degrees. Holding a key does not repeat robot commands in the current MuJoCo viewer. Position commands are limited to 0.8 rad/s and the model's joint and actuator limits. Commands typed while paused take effect after resuming. MuJoCo also receives keyboard shortcuts, so some letters change rendering options. Tab toggles the viewer panels.
 
-The green sphere marks a learning target. In manual mode the robot moves according to your keyboard commands. The launcher does not start PPO, load a trained policy, or complete the task automatically. It controls the simulated robot on this laptop.
+The green ball is a physical object resting on the desk or floor. Gravity and contact forces can move it, including off the desk edge. Press N to place it at another surface position. In manual mode the robot moves according to your keyboard commands. The launcher does not start PPO, load a trained policy, or complete the task automatically. It controls the simulated robot on this laptop.
 
 For an automatically closing manual window:
 
@@ -45,6 +45,8 @@ python -m so101_sim --seconds 10
 ```
 
 ![Initial SO-101 simulation](docs/simulation.png)
+
+![Physical ball on the adjacent floor](docs/simulation_floor.png)
 
 ## Install dependencies if needed
 
@@ -93,7 +95,7 @@ The trial does not add validation episodes, comparison baselines, checkpoint sel
 
 Agents must use `--trial` for authorized startup checks. Continuing beyond the first network update requires explicit user authorization to run training. Choosing more initial transitions with `--trial` does not authorize further updates. Neither the manual launcher nor code and documentation changes automatically start training.
 
-Only the policy's sampled actions control the robot during a trial. There is no IK solver, scripted reach controller, or teacher that performs the task for the policy. The environment initializes the robot and samples reachable Cartesian targets using forward kinematics on separate scratch simulation data. The generating joint angles are withheld from the policy and never become control commands.
+Only the policy's sampled actions control the robot during a trial. There is no IK solver, scripted reach controller, or teacher that performs the task for the policy. The environment initializes the robot and samples the ball's position geometrically on a support surface. Sampling never generates robot actions.
 
 ## One output location for every run
 
@@ -163,13 +165,28 @@ By default the observed environment is paced at real time. `--viewer-speed 4` di
 
 Mouse camera controls remain available. The viewer uses separate copies of the training model and data, so viewer physics controls cannot modify the robot used for learning. No keyboard task controller, scripted solver, or extra policy rollout is used. Close the viewer window or press Ctrl+C in the terminal to interrupt training. Full training saves the current policy to `runs/current/final_model.zip` with actual step and optimizer counts, records the interrupted status, and skips final evaluation. At a requested step limit, the viewer closes and full training completes its normal checkpoint evaluation.
 
-## Initial learning environment
+## Desk, physical ball, and learning environment
 
-The first task is local reach and hold. Success requires the `gripperframe` site to stay within 15 mm of the target, with combined speed of the first three joints below 0.3 rad/s, for ten consecutive 20 Hz control steps (0.5 s). Each episode has a six second deadline.
+The workspace uses a fixed **120 × 70 × 75 cm desk** (width × depth × floor-to-top height), a common desk size matching the published [IKEA TROTTEN dimensions](https://www.ikea.com.tw/en/products/office-workspace/office-desks-and-tables/trotten-spr-39621918). This is a dimension reference, not a detailed replica or a universal furniture standard. The simulated desk has a 30 mm thick top and four fixed collision-enabled legs. The robot is mounted on the top at world position `[0, 0, 0.75]` m; the desktop spans x = −0.2…1.0 m and y = −0.35…0.35 m. Upstream robot files, joint dynamics, actuator limits, and meshes remain unchanged.
 
-The first three joints are policy actions; wrist and gripper targets stay at their initial values. Manual keyboard control supports all six joints. Physics runs at 200 Hz. The 15-value observation contains joint positions, velocities, current actuator commands, the Cartesian target, and Cartesian error. Exact reset settings, action ranges, and reward coefficients are recorded by `SO101ReachEnv.task_config`.
+The green ball has a 15 mm radius and 20 g mass. A free joint allows translation and rotation. Gravity is explicitly `[0, 0, -9.81]` m/s². Six-dimensional contacts provide normal support and sliding, torsional, and rolling friction, with coefficients `[0.6, 0.005, 0.0005]` and contact `solref=[0.002, 1]`. Physics uses 1 ms steps and up to 50 solver iterations to resolve small-ball impacts. MuJoCo calculates the forces; the application never pins the ball to a surface, teleports it during stepping, or applies an artificial support force. See the [MuJoCo contact reference](https://mujoco.readthedocs.io/en/stable/XMLreference.html#body-geom). These are nominal parameters for an unspecified ball and surface, not measurements calibrated to particular real materials. Aerodynamic drag is not modeled.
 
-Targets start at least 40 mm from the initial end-effector and above 80 mm height, with penetration rejection at the configured 4 mm tolerance. Per-step reward is nonpositive and terminal success receives a bonus. Contacts deeper than the tolerance are checked at 20 Hz control boundaries and terminate the episode with a penalty.
+Each reset selects the table or floor with equal probability and gives the ball zero initial velocity. Its centre starts exactly one radius above the chosen surface: z = 0.765 m on the desk or z = 0.015 m on the floor. Table positions vary in a small curved patch near the arm: radius 0.201…0.207 m about `[0.0388353, 0]`, angle ±0.32 rad. Floor positions vary over x = 0.18…0.5 m and |y| = 0.43…0.65 m, outside the desk footprint and legs. There are no random floating 3D targets.
+
+For deterministic physics checks or an external caller, select a surface explicitly:
+
+```python
+env.reset(seed=42, options={"ball_surface": "table"})
+env.reset(seed=42, options={"ball_surface": "floor"})
+```
+
+The table-mounted SO-101 cannot reach the floor 0.75 m below its base. Floor balls are physical environmental cases, so the mixed reset distribution includes unreachable episodes. The existing three-joint reach controller is retained; this change does not add grasping, relocate the robot automatically, or claim that every surface point is reachable. A future learnable floor-reaching task requires a separately authorized mounting/task change.
+
+The task remains reach and hold, with the ball's **current simulated centre** as the target. Success requires the `gripperframe` site to stay within 15 mm of that centre, with combined speed of the first three joints below 0.3 rad/s, for ten consecutive 20 Hz control steps (0.5 s). Each episode has a six second deadline.
+
+The first three joints are policy actions; wrist and gripper targets stay at their initial values. Manual keyboard control supports all six joints. Physics runs at 1000 Hz with 50 physics steps per 20 Hz policy control step. The 15-value observation contains robot joint positions, velocities, current actuator commands, the current ball position, and Cartesian error. The ball adds seven position coordinates and six velocity coordinates to MuJoCo state without adding robot controls. Exact geometry, physics, reset settings, action ranges, and reward coefficients are recorded by `SO101ReachEnv.task_config` under task `SO101SurfaceBallReach-v2`. Existing checkpoints are incompatible and are rejected by the existing compatibility checks; they are retained without migration.
+
+Ball placements start at least 40 mm from the initial end-effector. Per-step reward is nonpositive and terminal success receives a bonus. Robot self-collisions and robot contacts with the table or floor deeper than 4 mm are checked at 20 Hz control boundaries and terminate the episode with a penalty. Ball contacts with the table, floor, or robot are allowed, so ordinary support and pushing do not end an episode. Observations, reward, and reported distance follow the moving ball. Viewer physics edits cannot disable gravity or replace the application-owned state.
 
 ## Verification and historical artifacts
 
@@ -178,7 +195,7 @@ python -m unittest discover -s tests -v
 python scripts/fetch_model.py --verify
 ```
 
-Tests cover keyboard mappings and real MuJoCo movement through a simulated viewer, pause/reset behavior, task contracts, model and checkpoint integrity, continuous training interruption, exact step limits, and the first-update stopping rule. Unit tests for training use fake counters rather than real training rollouts. A visible GUI still needs a manual keyboard check on the laptop.
+Tests cover keyboard mappings and real MuJoCo movement through a simulated viewer, pause/reset behavior, supported ball placement, gravitational falls, friction, drops from the desk edge, moving-goal observations, task contracts, model and checkpoint integrity, continuous training interruption, exact step limits, and the first-update stopping rule. Unit tests for training use fake counters rather than real training rollouts. A visible GUI still needs a manual keyboard check on the laptop.
 
 Earlier long-run checkpoints and reports remain under `checkpoints/first_reach/` and `reports/first_reach/` as historical artifacts. Starting the application or a startup trial does not replay or continue those experiments. Checkpoint compatibility checks remain in place; no model or checkpoint migration is performed by the launcher.
 

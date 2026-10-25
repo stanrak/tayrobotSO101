@@ -170,10 +170,7 @@ def run_episodes(
         if viewer is not None:
             viewer_state = np.empty(mujoco.mj_stateSize(env.model, mujoco.mjtState.mjSTATE_INTEGRATION))
             with viewer.lock():
-                viewer.cam.lookat[:] = [0.2, 0.0, 0.15]
-                viewer.cam.distance = 0.8
-                viewer.cam.azimuth = 135
-                viewer.cam.elevation = -25
+                env.configure_camera(viewer.cam)
         for episode_seed in seeds:
             with viewer.lock() if viewer is not None else nullcontext():
                 observation, info = env.reset(seed=int(episode_seed))

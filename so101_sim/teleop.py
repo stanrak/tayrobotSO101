@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from dataclasses import dataclass
 import math
 from queue import Empty, SimpleQueue
@@ -82,7 +83,11 @@ def _sync_keyboard_view(viewer, model, data, state: np.ndarray) -> None:
     """
     with viewer.lock():
         mujoco.mj_getState(model, data, state, mujoco.mjtState.mjSTATE_INTEGRATION)
+        options = copy.copy(model.opt)
         viewer.sync()
+        for name in dir(options):
+            if not name.startswith("_"):
+                setattr(model.opt, name, getattr(options, name))
         mujoco.mj_setState(model, data, state, mujoco.mjtState.mjSTATE_INTEGRATION)
         mujoco.mj_forward(model, data)
         # Publish the restored state so a native reset never appears on screen.
@@ -139,10 +144,7 @@ def run(*, seconds: float | None = None) -> None:
             show_right_ui=False,
         ) as viewer:
             with viewer.lock():
-                viewer.cam.lookat[:] = [0.17, 0.0, 0.17]
-                viewer.cam.distance = 0.8
-                viewer.cam.azimuth = 140.0
-                viewer.cam.elevation = -25.0
+                env.configure_camera(viewer.cam)
             paused = False
             quit_requested = False
             start = time.monotonic()

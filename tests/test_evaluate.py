@@ -90,6 +90,18 @@ class EvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "environment mismatch: task_config"):
             load_checked_policy(self.checkpoint, self.env)
 
+    def test_historical_floating_target_policy_is_rejected_without_migration(self):
+        historical = Path(__file__).resolve().parents[1] / "checkpoints/first_reach/best_model.zip"
+        metadata = metadata_path(historical)
+        original_checkpoint = historical.read_bytes()
+        original_metadata = metadata.read_bytes()
+        with patch("so101_sim.evaluate.PPO.load") as load:
+            with self.assertRaisesRegex(ValueError, "Checkpoint environment mismatch:"):
+                load_checked_policy(historical, self.env)
+            load.assert_not_called()
+        self.assertEqual(historical.read_bytes(), original_checkpoint)
+        self.assertEqual(metadata.read_bytes(), original_metadata)
+
     def test_changed_package_metadata_is_rejected(self):
         path = metadata_path(self.checkpoint)
         metadata = json.loads(path.read_text(encoding="utf-8"))
@@ -121,7 +133,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertTrue(viewers[0].did_interfere)
         self.assertEqual(actual, expected)
         np.testing.assert_array_equal(self.env.model.opt.gravity, [0, 0, -9.81])
-        self.assertEqual(self.env.model.opt.timestep, 0.005)
+        self.assertEqual(self.env.model.opt.timestep, 0.001)
 
     def test_timeout_and_collision_are_separate_reported_causes(self):
         baseline = run_episodes(self.env, [20_000], policy="no_motion")
