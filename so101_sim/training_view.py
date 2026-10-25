@@ -57,9 +57,16 @@ class TrainingViewer(BaseCallback):
             updates = self.progress().get("optimizer_steps", 0)
             total = self.model._total_timesteps
             target = f"{total:,}" if math.isfinite(total) else "unlimited"
+            target_age = ""
+            if "target_steps" in info:
+                target_age = (
+                    f" | target: {info['target_elapsed_seconds']:.1f}/"
+                    f"{info['target_duration_seconds']:.1f} sim s "
+                    f"({info['target_steps']}/{info['target_min_steps']} steps)"
+                )
             print(f"Training steps: {self.num_timesteps:,}/{target} | "
                   f"env 0 episodes: {self.episodes} | distance: {distance:.1f} mm | "
-                  f"network updates: {updates}", flush=True)
+                  f"network updates: {updates}{target_age}", flush=True)
             self.last_status = now
         return True
 

@@ -126,7 +126,7 @@ def run(*, seconds: float | None = None) -> None:
         print(
             "Press repeatedly: each press changes its target by 2 degrees.\n"
             "Holding a key does not repeat commands; command speed <= 0.8 rad/s.\n"
-            "Backspace: home targets | N: new episode | Space: pause/resume | Esc: quit\n"
+            "Backspace: home targets | N: new reachable ball | Space: pause/resume | Esc: quit\n"
             "Joint commands typed while paused take effect after resuming.\n"
             "MuJoCo also receives these keys; some letters toggle rendering options,\n"
             "and Esc selects the free camera before exiting. Tab toggles its UI.\n"
@@ -170,10 +170,10 @@ def run(*, seconds: float | None = None) -> None:
                             paused = not paused
                             print("Paused." if paused else "Resumed.", flush=True)
                         elif command.kind == "reset":
-                            env.reset()
+                            env.reset(options={"new_target": True})
                             target = np.clip(env.home.copy(), limits[:, 0], limits[:, 1])
                             control = env.data.ctrl.copy()
-                            print("New episode; robot reset to home.", flush=True)
+                            print("New reachable ball; robot reset to home.", flush=True)
                             _print_targets(names, target)
                         elif command.kind == "home":
                             target = np.clip(env.home.copy(), limits[:, 0], limits[:, 1])

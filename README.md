@@ -31,12 +31,12 @@ The launcher uses `.venv\Scripts\python.exe` when present, otherwise `python` fr
 | Y / H | Gripper opening angle |
 | Space | Pause / resume simulation |
 | Backspace | Move joint targets smoothly back to the initial pose |
-| N | Reset the initial pose and place the ball at a new table/floor position |
+| N | Reset the initial pose and explicitly choose a new reachable ball position |
 | Escape | Close the simulation |
 
 Use plain keys without Ctrl or Alt; no numeric keypad is required. Press repeatedly: each press changes its joint target by 2 degrees. Holding a key does not repeat robot commands in the current MuJoCo viewer. Position commands are limited to 0.8 rad/s and the model's joint and actuator limits. Commands typed while paused take effect after resuming. MuJoCo also receives keyboard shortcuts, so some letters change rendering options. Tab toggles the viewer panels.
 
-The green ball is a physical object resting on the desk or floor. Gravity and contact forces can move it, including off the desk edge. Press N to place it at another surface position. In manual mode the robot moves according to your keyboard commands. The launcher does not start PPO, load a trained policy, or complete the task automatically. It controls the simulated robot on this laptop.
+The green ball starts on the desk within the robot's verified reach. Gravity and contact forces can move it, including off the desk edge. Press N to explicitly choose another reachable position. Manual mode does not automatically resample targets. In manual mode the robot moves according to your keyboard commands. The launcher does not start PPO, load a trained policy, or complete the task automatically. It controls the simulated robot on this laptop.
 
 For an automatically closing manual window:
 
@@ -45,8 +45,6 @@ python -m so101_sim --seconds 10
 ```
 
 ![Initial SO-101 simulation](docs/simulation.png)
-
-![Physical ball on the adjacent floor](docs/simulation_floor.png)
 
 ## Install dependencies if needed
 
@@ -95,7 +93,7 @@ The trial does not add validation episodes, comparison baselines, checkpoint sel
 
 Agents must use `--trial` for authorized startup checks. Continuing beyond the first network update requires explicit user authorization to run training. Choosing more initial transitions with `--trial` does not authorize further updates. Neither the manual launcher nor code and documentation changes automatically start training.
 
-Only the policy's sampled actions control the robot during a trial. There is no IK solver, scripted reach controller, or teacher that performs the task for the policy. The environment initializes the robot and samples the ball's position geometrically on a support surface. Sampling never generates robot actions.
+Only the policy's sampled actions control the robot during a trial. There is no IK solver, scripted reach controller, or teacher that performs the task for the policy. The environment verifies reachable ball positions using forward kinematics on separate scratch simulation data. Sampling never generates robot actions, and its generating joint angles are withheld from observations, info, and controls.
 
 ## One output location for every run
 
@@ -171,20 +169,27 @@ The workspace uses a fixed **120 × 70 × 75 cm desk** (width × depth × floor-
 
 The green ball has a 15 mm radius and 20 g mass. A free joint allows translation and rotation. Gravity is explicitly `[0, 0, -9.81]` m/s². Six-dimensional contacts provide normal support and sliding, torsional, and rolling friction, with coefficients `[0.6, 0.005, 0.0005]` and contact `solref=[0.002, 1]`. Physics uses 1 ms steps and up to 50 solver iterations to resolve small-ball impacts. MuJoCo calculates the forces; the application never pins the ball to a surface, teleports it during stepping, or applies an artificial support force. See the [MuJoCo contact reference](https://mujoco.readthedocs.io/en/stable/XMLreference.html#body-geom). These are nominal parameters for an unspecified ball and surface, not measurements calibrated to particular real materials. Aerodynamic drag is not modeled.
 
-Each reset selects the table or floor with equal probability and gives the ball zero initial velocity. Its centre starts exactly one radius above the chosen surface: z = 0.765 m on the desk or z = 0.015 m on the floor. Table positions vary in a small curved patch near the arm: radius 0.201…0.207 m about `[0.0388353, 0]`, angle ±0.32 rad. Floor positions vary over x = 0.18…0.5 m and |y| = 0.43…0.65 m, outside the desk footprint and legs. There are no random floating 3D targets.
+Default targets are sampled **only on the desk within the robot's reach**. A candidate is accepted only after forward kinematics finds a scratch pose inside the existing three-joint action limits whose end-effector is within 14 mm of the ball centre, with all robot, table, and actual ball contacts nonpenetrating to a 1 µm numerical tolerance. The sampler uses pan −0.35…0.35, lift −0.55…−0.45, and elbow 1.48…1.6 rad, plus a 6…10 mm outward offset from the end-effector's XY position to clear the fixed jaw. The actual robot still resets to its slightly jittered home pose, at least 40 mm from the ball. No generating angles are used as actions or exposed to the policy. Success still requires the policy to reach and hold the ball itself.
 
-For deterministic physics checks or an external caller, select a surface explicitly:
+The stationary ball starts directly on the desk, with centre z = 0.765 m and zero initial velocity. Positions vary near x = 0.24…0.26 m and y = ±0.075 m; the FK and collision checks determine acceptance, rather than an arbitrary 3D box. Automatic target changes and manual N select a point at least 20 mm from the previous spawn. Explicit seeded resets reproduce their seed independently of previous positions. Physical ball motion after placement remains unrestricted.
+
+Each learning target receives **1,200 control steps, equivalent to 60 simulated seconds at 20 Hz**, before automatic resampling. A single attempt also has a 1,200-step limit, increased from the previous 120 steps / 6 seconds. Success or collision can end an attempt early; the automatic unseeded reset then restores the **same initial ball position** and resets the robot, retaining the cumulative target step count. At the 1,200-step target boundary, the current attempt ends and the next automatic reset samples a new reachable target. This prevents repeated early failures from changing the goal every few frames. It provides more interaction time without claiming that learning is guaranteed in one target budget.
+
+Exposure is counted independently for each environment, across PPO rollouts and network updates. Simulation time is derived from actual control steps, not wall-clock time: a real-time viewer shows about 60 seconds per target, higher viewer speeds shorten that wall-clock interval, and headless execution runs as fast as possible. Training status reports target age in simulated seconds and steps. This is an environment budget, separate from the trainer's total `--timesteps` budget and the explicit first-update trial limit.
+
+For an external caller, seeded resets always start a fresh reproducible target; `new_target` explicitly overrides the dwell budget:
 
 ```python
-env.reset(seed=42, options={"ball_surface": "table"})
-env.reset(seed=42, options={"ball_surface": "floor"})
+env.reset(seed=42)  # Fresh, reproducible reachable table target.
+env.reset()  # Retry the existing target until its 1,200-step budget expires.
+env.reset(options={"new_target": True})  # Explicitly choose a new target now.
 ```
 
-The table-mounted SO-101 cannot reach the floor 0.75 m below its base. Floor balls are physical environmental cases, so the mixed reset distribution includes unreachable episodes. The existing three-joint reach controller is retained; this change does not add grasping, relocate the robot automatically, or claim that every surface point is reachable. A future learnable floor-reaching task requires a separately authorized mounting/task change.
+The table-mounted SO-101 cannot reach the floor 0.75 m below its base, so floor positions are excluded from default learning and manual targets. An explicit `env.reset(seed=42, options={"ball_surface": "floor"})` remains available only for physics diagnostics, such as support-force and fall tests. The existing three-joint reach controller is retained; a future learnable floor-reaching task requires a separately authorized mounting/task change.
 
-The task remains reach and hold, with the ball's **current simulated centre** as the target. Success requires the `gripperframe` site to stay within 15 mm of that centre, with combined speed of the first three joints below 0.3 rad/s, for ten consecutive 20 Hz control steps (0.5 s). Each episode has a six second deadline.
+The task remains reach and hold, with the ball's **current simulated centre** as the target. Success requires the `gripperframe` site to stay within 15 mm of that centre, with combined speed of the first three joints below 0.3 rad/s, for ten consecutive 20 Hz control steps (0.5 s).
 
-The first three joints are policy actions; wrist and gripper targets stay at their initial values. Manual keyboard control supports all six joints. Physics runs at 1000 Hz with 50 physics steps per 20 Hz policy control step. The 15-value observation contains robot joint positions, velocities, current actuator commands, the current ball position, and Cartesian error. The ball adds seven position coordinates and six velocity coordinates to MuJoCo state without adding robot controls. Exact geometry, physics, reset settings, action ranges, and reward coefficients are recorded by `SO101ReachEnv.task_config` under task `SO101SurfaceBallReach-v2`. Existing checkpoints are incompatible and are rejected by the existing compatibility checks; they are retained without migration.
+The first three joints are policy actions; wrist and gripper targets stay at their initial values. Manual keyboard control supports all six joints. Physics runs at 1000 Hz with 50 physics steps per 20 Hz policy control step. The 15-value observation contains robot joint positions, velocities, current actuator commands, the current ball position, and Cartesian error. The ball adds seven position coordinates and six velocity coordinates to MuJoCo state without adding robot controls. Exact geometry, physics, reachability checks, target timing, action ranges, and reward coefficients are recorded by `SO101ReachEnv.task_config` under task `SO101ReachableSurfaceBall-v3`. Existing checkpoints are incompatible and are rejected by the existing compatibility checks; they are retained without migration.
 
 Ball placements start at least 40 mm from the initial end-effector. Per-step reward is nonpositive and terminal success receives a bonus. Robot self-collisions and robot contacts with the table or floor deeper than 4 mm are checked at 20 Hz control boundaries and terminate the episode with a penalty. Ball contacts with the table, floor, or robot are allowed, so ordinary support and pushing do not end an episode. Observations, reward, and reported distance follow the moving ball. Viewer physics edits cannot disable gravity or replace the application-owned state.
 
@@ -195,7 +200,7 @@ python -m unittest discover -s tests -v
 python scripts/fetch_model.py --verify
 ```
 
-Tests cover keyboard mappings and real MuJoCo movement through a simulated viewer, pause/reset behavior, supported ball placement, gravitational falls, friction, drops from the desk edge, moving-goal observations, task contracts, model and checkpoint integrity, continuous training interruption, exact step limits, and the first-update stopping rule. Unit tests for training use fake counters rather than real training rollouts. A visible GUI still needs a manual keyboard check on the laptop.
+Tests cover keyboard mappings and real MuJoCo movement through a simulated viewer, pause/reset behavior, reachable supported ball placement, target persistence through automatic resets, exact target step budgets, gravitational falls, friction, drops from the desk edge, moving-goal observations, task contracts, model and checkpoint integrity, continuous training interruption, exact step limits, and the first-update stopping rule. Unit tests for training use fake counters rather than real training rollouts. A visible GUI still needs a manual keyboard check on the laptop.
 
 Earlier long-run checkpoints and reports remain under `checkpoints/first_reach/` and `reports/first_reach/` as historical artifacts. Starting the application or a startup trial does not replay or continue those experiments. Checkpoint compatibility checks remain in place; no model or checkpoint migration is performed by the launcher.
 

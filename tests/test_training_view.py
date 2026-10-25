@@ -79,6 +79,21 @@ class TrainingViewerTests(unittest.TestCase):
             self.assertTrue(self.callback._on_step())
         self.assertIn("Training steps: 600,000/unlimited", self.output.getvalue())
 
+    def test_status_reports_target_age_without_advancing_training(self):
+        self.callback.locals["infos"] = [{
+            "distance": 0.05,
+            "target_steps": 100,
+            "target_min_steps": 1200,
+            "target_elapsed_seconds": 5.0,
+            "target_duration_seconds": 60.0,
+        }]
+        qpos = self.env.data.qpos.copy()
+        with patch.object(self.env, "step", side_effect=AssertionError("Observer took an action")), patch("time.sleep"):
+            self.assertTrue(self.callback._on_step())
+        self.assertIn("target: 5.0/60.0 sim s (100/1200 steps)", self.output.getvalue())
+        np.testing.assert_array_equal(self.env.data.qpos, qpos)
+        self.assertEqual(self.env.data.time, 0)
+
     def test_end_closes_window_and_reports_actual_update_count(self):
         viewer = self.callback.viewer
         self.callback._on_rollout_end()

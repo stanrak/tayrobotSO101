@@ -5,6 +5,7 @@ import unittest
 import mujoco
 import numpy as np
 from stable_baselines3.common.env_checker import check_env
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 from so101_sim.env import SO101ReachEnv
 
@@ -36,8 +37,7 @@ class ReachEnvironmentTests(unittest.TestCase):
         check_env(self.env)
 
     def test_reset_targets_require_movement(self):
-        surfaces = set()
-        positions = {"table": set(), "floor": set()}
+        positions = set()
         for seed in range(100):
             obs, info = self.env.reset(seed=seed)
             self.assertTrue(self.env.observation_space.contains(obs))
@@ -45,20 +45,40 @@ class ReachEnvironmentTests(unittest.TestCase):
             self.assertFalse(info["is_success"])
             self.assertFalse(self.env._collision(self.env.data))
             self.assertTrue(all(contact.dist >= -1e-8 for contact in self.env.data.contact))
-            surface = info["ball_spawn_surface"]
-            surfaces.add(surface)
-            positions[surface].add(tuple(self.env.goal[:2]))
-            support_height = 0.75 if surface == "table" else 0.0
-            self.assertAlmostEqual(self.env.goal[2] - 0.015, support_height)
-            if surface == "table":
-                self.assertTrue(-0.2 + 0.015 < self.env.goal[0] < 1.0 - 0.015)
-                self.assertLess(abs(self.env.goal[1]), 0.35 - 0.015)
-            else:
-                self.assertGreater(abs(self.env.goal[1]), 0.35 + 0.015)
+            self.assertEqual(info["ball_spawn_surface"], "table")
+            self.assertTrue(info["target_changed"])
+            positions.add(tuple(self.env.goal[:2]))
+            self.assertAlmostEqual(self.env.goal[2] - 0.015, 0.75)
+            self.assertTrue(-0.2 + 0.015 < self.env.goal[0] < 1.0 - 0.015)
+            self.assertLess(abs(self.env.goal[1]), 0.35 - 0.015)
             np.testing.assert_array_equal(self.env.data.qvel[self.env.ball_dof_adr:], np.zeros(6))
             np.testing.assert_array_equal(self.env.data.qpos[self.env.ball_qpos_adr + 3:], [1, 0, 0, 0])
-        self.assertEqual(surfaces, {"table", "floor"})
-        self.assertTrue(all(len(points) > 20 for points in positions.values()))
+
+            # The retained scratch state proves reachability using the actual
+            # ball collider; those joint angles must not become robot commands.
+            witness = self.env._scratch
+            distance = np.linalg.norm(witness.site_xpos[self.env.ee_site] - self.env.goal)
+            self.assertLessEqual(distance, 0.014)
+            radial_offset = np.linalg.norm(witness.site_xpos[self.env.ee_site, :2] - self.env.goal[:2])
+            self.assertGreaterEqual(radial_offset, 0.006 - 1e-12)
+            self.assertLessEqual(radial_offset, 0.010 + 1e-12)
+            self.assertTrue(all(contact.dist >= -1e-6 for contact in witness.contact))
+            self.assertTrue(np.all(witness.qpos[:3] >= self.env.action_low))
+            self.assertTrue(np.all(witness.qpos[:3] <= self.env.action_high))
+            np.testing.assert_array_equal(witness.qpos[3:6], self.env.home[3:])
+            np.testing.assert_array_equal(witness.qpos[self.env.ball_qpos_adr:self.env.ball_qpos_adr + 3], self.env.goal)
+            expected_home = self.env.home.copy()
+            expected_home[:3] += np.random.default_rng(seed).uniform(-0.04, 0.04, 3)
+            np.testing.assert_array_equal(self.env.data.qpos[:6], expected_home)
+            np.testing.assert_array_equal(self.env.data.ctrl, expected_home)
+            self.assertGreater(np.linalg.norm(witness.qpos[:3] - expected_home[:3]), 0.1)
+            self.assertFalse(any("witness" in key or "joint" in key for key in info))
+            np.testing.assert_allclose(obs[:3], 2 * (expected_home[:3] - self.env.action_low)
+                                       / (self.env.action_high - self.env.action_low) - 1, rtol=1e-6)
+            np.testing.assert_allclose(obs[6:9], self.env.neutral_action(), rtol=1e-6)
+        self.assertEqual(len(positions), 100)
+        points = np.array(list(positions))
+        self.assertGreater(np.ptp(points[:, 1]), 0.05)
 
     def test_surface_override_and_invalid_surface(self):
         for surface in ("table", "floor"):
@@ -68,6 +88,102 @@ class ReachEnvironmentTests(unittest.TestCase):
             np.testing.assert_array_equal(first, repeated)
         with self.assertRaisesRegex(ValueError, "ball_surface"):
             self.env.reset(options={"ball_surface": "air"})
+        for value in (1, "yes", None):
+            with self.subTest(new_target=value), self.assertRaisesRegex(ValueError, "new_target"):
+                self.env.reset(options={"new_target": value})
+
+    def test_target_survives_early_resets_until_cumulative_budget(self):
+        self.env.target_min_steps = 5
+        self.env.max_steps = 20
+        _, info = self.env.reset(seed=9)
+        initial = info["target_spawn_position"].copy()
+        action = self.env.neutral_action()
+        for index in range(5):
+            _, _, terminated, truncated, info = self.env.step(action)
+            self.assertFalse(terminated)
+            self.assertEqual(truncated, index == 4)
+            self.assertEqual(info["target_steps"], index + 1)
+            self.assertEqual(info["target_remaining_steps"], 4 - index)
+            self.assertAlmostEqual(info["target_elapsed_seconds"], (index + 1) * self.env.dt)
+            np.testing.assert_array_equal(info["target_spawn_position"], initial)
+            if index < 4:
+                _, reset_info = self.env.reset()
+                self.assertFalse(reset_info["target_changed"])
+                self.assertEqual(self.env.steps, 0)
+                self.assertEqual(reset_info["target_steps"], index + 1)
+                np.testing.assert_array_equal(self.env.goal, initial)
+                action = self.env.neutral_action()
+        _, changed = self.env.reset()
+        self.assertTrue(changed["target_changed"])
+        self.assertEqual(changed["target_steps"], 0)
+        self.assertGreaterEqual(np.linalg.norm(changed["target_spawn_position"] - initial), 0.02)
+
+    def test_seed_and_explicit_new_target_override_dwell_budget(self):
+        first, info = self.env.reset(seed=17)
+        initial = info["target_spawn_position"].copy()
+        for _ in range(3):
+            self.env.step(self.env.neutral_action())
+        _, unchanged = self.env.reset(options={"new_target": False})
+        self.assertFalse(unchanged["target_changed"])
+        self.assertEqual(unchanged["target_steps"], 3)
+        np.testing.assert_array_equal(unchanged["target_spawn_position"], initial)
+        _, changed = self.env.reset(options={"new_target": True})
+        self.assertTrue(changed["target_changed"])
+        self.assertEqual(changed["target_steps"], 0)
+        self.assertGreaterEqual(np.linalg.norm(changed["target_spawn_position"] - initial), 0.02)
+        repeated, reseeded = self.env.reset(seed=17)
+        self.assertTrue(reseeded["target_changed"])
+        self.assertEqual(reseeded["target_steps"], 0)
+        np.testing.assert_array_equal(first, repeated)
+
+    def test_collision_resets_keep_target_without_counting_extra_steps(self):
+        self.env.target_min_steps = 4
+        self.env.reset(seed=8)
+        initial = self.env._target_spawn_position.copy()
+        for index in range(4):
+            # A deliberately colliding fixture exercises the real termination
+            # and reset path without teaching or controlling a learned policy.
+            self.env.data.qpos[:6] = [0, 1, 1, -0.4, 0, 0.5]
+            self.env.data.ctrl[:] = self.env.data.qpos[:6]
+            mujoco.mj_forward(self.env.model, self.env.data)
+            _, _, terminated, _, info = self.env.step(self.env.neutral_action())
+            self.assertTrue(terminated)
+            self.assertTrue(info["collision"])
+            self.assertEqual(info["target_steps"], index + 1)
+            _, reset_info = self.env.reset()
+            if index < 3:
+                self.assertFalse(reset_info["target_changed"])
+                np.testing.assert_array_equal(reset_info["target_spawn_position"], initial)
+                self.assertEqual(reset_info["target_steps"], index + 1)
+            else:
+                self.assertTrue(reset_info["target_changed"])
+                self.assertGreaterEqual(np.linalg.norm(reset_info["target_spawn_position"] - initial), 0.02)
+
+    def test_vectorized_auto_resets_preserve_each_environment_target(self):
+        environments = [SO101ReachEnv(), SO101ReachEnv()]
+        for env, budget in zip(environments, (3, 5), strict=True):
+            env.max_steps = 1
+            env.target_min_steps = budget
+        vector = DummyVecEnv([lambda env=env: env for env in environments])
+        self.addCleanup(vector.close)
+        vector.seed(42)
+        vector.reset()
+        initial = [env._target_spawn_position.copy() for env in environments]
+        self.assertFalse(np.array_equal(initial[0], initial[1]))
+        for step in range(1, 6):
+            actions = np.array([env.neutral_action() for env in environments])
+            _, _, dones, infos = vector.step(actions)
+            self.assertTrue(dones.all())
+            for index, (env, budget) in enumerate(zip(environments, (3, 5), strict=True)):
+                expected_age = step % budget
+                self.assertEqual(env.target_steps, expected_age)
+                self.assertEqual(infos[index]["target_steps"], expected_age or budget)
+                if step < budget:
+                    np.testing.assert_array_equal(env._target_spawn_position, initial[index])
+                    self.assertFalse(vector.reset_infos[index]["target_changed"])
+                elif step == budget:
+                    self.assertTrue(vector.reset_infos[index]["target_changed"])
+                    self.assertGreaterEqual(np.linalg.norm(env._target_spawn_position - initial[index]), 0.02)
 
     def test_workspace_physical_parameters_are_fixed(self):
         model = self.env.model
@@ -100,9 +216,14 @@ class ReachEnvironmentTests(unittest.TestCase):
             np.testing.assert_allclose(geom.friction, [0.6, 0.005, 0.0005])
             np.testing.assert_allclose(geom.solref, [0.002, 1])
         config = self.env.task_config
-        self.assertEqual(config["task"], "SO101SurfaceBallReach-v2")
+        self.assertEqual(config["task"], "SO101ReachableSurfaceBall-v3")
         self.assertEqual(config["observation_version"], 2)
         self.assertFalse(config["floor_goals_reachable"])
+        self.assertEqual(config["default_ball_surface"], "table")
+        self.assertEqual(self.env.max_steps, 1200)
+        self.assertEqual(self.env.target_min_steps, 1200)
+        self.assertEqual(config["episode_duration_seconds"], 60)
+        self.assertEqual(config["target_duration_seconds"], 60)
 
     def test_gravity_drop_and_support_reaction(self):
         for surface, xy, support_height, support_name in (
@@ -232,17 +353,27 @@ class ReachEnvironmentTests(unittest.TestCase):
                 self.assertLessEqual(reward, 0.0)
 
     def test_timeout_is_truncation(self):
-        # A real floor placement is outside this table-mounted arm's reach.
-        self.env.reset(seed=0, options={"ball_surface": "floor"})
+        # No-motion interaction keeps a real reachable ball for the complete
+        # default 60 simulated seconds, rather than shortening this regression.
+        _, reset_info = self.env.reset(seed=0)
+        initial = reset_info["target_spawn_position"].copy()
         action = self.env.neutral_action()
-        for _ in range(self.env.max_steps):
+        for index in range(self.env.max_steps):
             _, _, terminated, truncated, info = self.env.step(action)
             self.assertFalse(terminated)
+            self.assertEqual(truncated, index == self.env.max_steps - 1)
+            np.testing.assert_array_equal(info["target_spawn_position"], initial)
         self.assertTrue(truncated)
         self.assertFalse(info["is_success"])
+        self.assertEqual(info["target_steps"], 1200)
+        self.assertAlmostEqual(self.env.data.time, 60, places=6)
+        _, new_info = self.env.reset()
+        self.assertTrue(new_info["target_changed"])
+        self.assertGreaterEqual(np.linalg.norm(new_info["target_spawn_position"] - initial), 0.02)
 
     def test_success_requires_full_hold(self):
         self.env.reset(seed=0)
+        initial_target = self.env._target_spawn_position.copy()
         action = self.env.neutral_action()
         for _ in range(30):
             self.env.step(action)
@@ -259,6 +390,11 @@ class ReachEnvironmentTests(unittest.TestCase):
             self.assertEqual(info["is_success"], index == self.env.hold_required - 1)
             self.assertEqual(terminated, info["is_success"])
             self.assertFalse(truncated)
+        age = self.env.target_steps
+        _, reset_info = self.env.reset()
+        self.assertFalse(reset_info["target_changed"])
+        self.assertEqual(reset_info["target_steps"], age)
+        np.testing.assert_array_equal(reset_info["target_spawn_position"], initial_target)
 
 
 if __name__ == "__main__":

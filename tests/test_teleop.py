@@ -126,14 +126,15 @@ class TeleopTests(unittest.TestCase):
         np.testing.assert_array_equal(viewer.controls[0], viewer.controls[2])
         self.assertGreater(env.data.ctrl[5], viewer.initial_ctrl[5])
 
-    def test_new_episode_changes_goal(self):
-        baseline = SO101ReachEnv()
-        self.addCleanup(baseline.close)
-        baseline.reset(seed=0)
-        first_goal = baseline.goal.copy()
-        env, _ = self._run_with_keys([[ord("N")]])
+    def test_new_ball_key_overrides_target_dwell(self):
+        original_reset = SO101ReachEnv.reset
+        with patch.object(SO101ReachEnv, "reset", autospec=True, side_effect=original_reset) as reset:
+            env, viewer = self._run_with_keys([[ord("N")]])
         self.addCleanup(env.close)
-        self.assertFalse(np.array_equal(first_goal, env.goal))
+        self.assertEqual(reset.call_count, 2)
+        self.assertEqual(reset.call_args.kwargs, {"options": {"new_target": True}})
+        first_xy = viewer.initial_qpos[env.ball_qpos_adr:env.ball_qpos_adr + 2]
+        self.assertFalse(np.array_equal(first_xy, env.goal[:2]))
 
     def test_builtin_backspace_reset_cannot_overwrite_keyboard_physics(self):
         env = SO101ReachEnv()
