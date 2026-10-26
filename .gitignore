@@ -1,6 +1,3 @@
-# Ignore the instructions file
-instructions/huongdan.md
-
 __pycache__/
 *.py[cod]
 .*.lock
@@ -8,6 +5,7 @@ __pycache__/
 runs/
 checkpoints/
 reports/
+private/
 docs/first_reach.gif
 docs/successful_reach.gif
 tests/
