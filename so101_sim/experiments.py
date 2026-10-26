@@ -22,9 +22,12 @@ PACKAGES = ("numpy", "mujoco", "gymnasium", "stable-baselines3", "torch")
 FIELDS = (
     "run_id", "path", "created_utc", "status", "mode", "seed", "task",
     "environment_sha256", "source_sha256", "git_commit", "git_dirty",
-    "requested_timesteps", "actual_timesteps", "optimizer_steps", "num_envs",
+    "requested_timesteps", "actual_timesteps", "optimizer_steps", "update_count",
+    "optimization_epochs", "num_envs", "vec_env_backend", "reward_scale",
     "training_seconds", "learning_rate", "batch_size", "n_steps", "n_epochs",
-    "gamma", "log_std_init", "eval_kind", "eval_seed_start", "eval_seed_end",
+    "gamma", "log_std_init", "target_kl", "use_sde", "sde_sample_freq",
+    "rollout_seconds_including_callbacks", "optimization_seconds", "diagnostics_seconds", "validation_seconds",
+    "heldout_seconds", "eval_kind", "eval_seed_start", "eval_seed_end",
     "eval_seed_sha256", "eval_episodes", "success_rate", "mean_return",
     "mean_final_distance_m", "evaluation_path", "evaluation_checkpoint_sha256",
     "metadata_error",
@@ -152,7 +155,8 @@ def finish_run_record(output: Path, *, status: str, error: str | None = None) ->
     exceptional = status in {"failed", "interrupted"}
     record["status"] = training.get("status") if not exceptional and training.get("status") in terminal else status
     record["finished_utc"] = (_now() if exceptional else training.get("finished_utc")) or _now()
-    for key in ("actual_timesteps", "optimizer_steps", "update_count", "training_seconds", "elapsed_seconds"):
+    for key in ("actual_timesteps", "optimizer_steps", "update_count", "optimization_epochs",
+                "training_seconds", "elapsed_seconds", "phase_seconds"):
         if key in training:
             record[key] = training[key]
     if error is not None:
@@ -202,6 +206,8 @@ def _run_row(directory: Path, root: Path) -> dict[str, Any]:
     training, training_error = _read_json(directory / "training.json")
     config = training.get("config", {})
     config = config if isinstance(config, dict) else {}
+    phases = training.get("phase_seconds", record.get("phase_seconds", {}))
+    phases = phases if isinstance(phases, dict) else {}
     environment = training.get("environment", {})
     environment = environment if isinstance(environment, dict) else {}
     task = environment.get("task_config", {})
@@ -232,9 +238,16 @@ def _run_row(directory: Path, root: Path) -> dict[str, Any]:
         "requested_timesteps": config.get("requested_timesteps", ""),
         "actual_timesteps": training.get("actual_timesteps", record.get("actual_timesteps", "")),
         "optimizer_steps": training.get("optimizer_steps", record.get("optimizer_steps", "")),
+        "update_count": training.get("update_count", record.get("update_count", "")),
+        "optimization_epochs": training.get("optimization_epochs", record.get("optimization_epochs", "")),
         "num_envs": config.get("num_envs", ""),
         "training_seconds": training.get("training_seconds", training.get("elapsed_seconds", "")),
-        **{key: config.get(key, "") for key in ("learning_rate", "batch_size", "n_steps", "n_epochs", "gamma", "log_std_init")},
+        **{key: config.get(key, "") for key in (
+            "learning_rate", "batch_size", "n_steps", "n_epochs", "gamma", "log_std_init",
+            "reward_scale", "vec_env_backend", "target_kl", "use_sde", "sde_sample_freq",
+        )},
+        "rollout_seconds_including_callbacks": phases.get("rollout_including_callbacks", ""),
+        **{f"{key}_seconds": phases.get(key, "") for key in ("optimization", "diagnostics", "validation", "heldout")},
         "metadata_error": "; ".join(error for error in (record_error, training_error, report_error) if error),
     }
     if mode == "evaluation":

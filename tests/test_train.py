@@ -1,6 +1,7 @@
 """Verify training modes and budgets with fake environments and a fake PPO."""
 
 from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
+import csv
 import io
 import json
 import math
@@ -63,6 +64,7 @@ class RolloutRoundingPPO:
     instances = []
     interrupt_after_rollouts = None
     fast_forward_at_interrupt = None
+    early_stop_epochs = None
 
     def __init__(self, policy, env, **kwargs):
         self.env = env
@@ -73,6 +75,11 @@ class RolloutRoundingPPO:
         self.callback_calls = 0
         self.learn_budgets = []
         self.completed_rollouts = 0
+        self.rollout_update_count = 0
+        self.rollout_seconds = 0.0
+        self.optimization_seconds = 0.0
+        self.diagnostics_seconds = 0.0
+        self.collected_rewards = []
         self.policy = SimpleNamespace(optimizer=CountingOptimizer())
         self.instances.append(self)
 
@@ -96,7 +103,8 @@ class RolloutRoundingPPO:
             if callback is not None:
                 callback.on_rollout_start()
             for _ in range(self.kwargs["n_steps"]):
-                _, _, _, infos = self.env.step(np.zeros((self.env.num_envs, 3), dtype=np.float32))
+                _, rewards, _, infos = self.env.step(np.zeros((self.env.num_envs, 3), dtype=np.float32))
+                self.collected_rewards.extend(rewards.tolist())
                 self.num_timesteps += self.env.num_envs
                 if callback is not None:
                     self.callback_calls += 1
@@ -109,11 +117,13 @@ class RolloutRoundingPPO:
             if callback is not None:
                 callback.on_rollout_end()
             batch_count = math.ceil(self.kwargs["n_steps"] * self.env.num_envs / self.kwargs["batch_size"])
-            for _ in range(self.kwargs["n_epochs"]):
+            epochs = self.kwargs["n_epochs"] if self.early_stop_epochs is None else self.early_stop_epochs
+            for _ in range(epochs):
                 for _ in range(batch_count):
                     self.policy.optimizer.step()
                 self._n_updates += 1
             self.completed_rollouts += 1
+            self.rollout_update_count += 1
             if self.completed_rollouts == self.interrupt_after_rollouts:
                 if self.fast_forward_at_interrupt is not None:
                     # Simulate a much later user interruption cheaply. No real
@@ -182,6 +192,9 @@ class StartupTrialTests(unittest.TestCase):
             checkpoint = stack.enter_context(patch.object(train, "save_checkpoint"))
             validation = stack.enter_context(patch.object(train, "FixedSeedEvaluation"))
             validation.return_value.training_metadata.return_value = {"validation_marker": True}
+            validation.return_value.validation_seconds = 0.0
+            validation.return_value.validation_episodes = 0
+            validation.return_value.validation_steps = 0
             evaluate = stack.enter_context(patch.object(
                 train, "evaluate_checkpoint", return_value={"results": {"trained": {"summary": summary}}},
             ))
@@ -491,6 +504,200 @@ class StartupTrialTests(unittest.TestCase):
                 self.assertFalse(self.output.exists())
                 environment.assert_not_called()
                 policy.assert_not_called()
+
+    def test_reward_scale_changes_training_rewards_but_monitor_keeps_raw_returns(self):
+        self.run_fake_trial("--timesteps", "23")
+        model = RolloutRoundingPPO.instances[0]
+        np.testing.assert_allclose(model.collected_rewards, -0.01)
+        monitor_path = self.output / "monitor_0.csv.monitor.csv"
+        with monitor_path.open(encoding="utf-8") as handle:
+            next(handle)
+            rows = list(csv.DictReader(handle))
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(float(row["r"]) == -7.0 for row in rows))
+        report = json.loads((self.output / "training.json").read_text())
+        self.assertEqual(report["config"]["reward_scale"], 0.01)
+        self.assertEqual(report["environment"], {"fake": True})
+
+    def test_full_training_experiment_options_are_forwarded_and_recorded(self):
+        with self.fake_full_training() as fake:
+            train.main([
+                "--timesteps", "256", "--envs", "1", "--output", str(self.output),
+                "--reward-scale", "1", "--learning-rate", "0.0001", "--n-epochs", "5",
+                "--target-kl", "0.02", "--use-sde", "--sde-sample-freq", "8",
+            ])
+        model = RolloutRoundingPPO.instances[0]
+        self.assertEqual(model.kwargs["learning_rate"], 0.0001)
+        self.assertEqual(model.kwargs["n_epochs"], 5)
+        self.assertEqual(model.kwargs["target_kl"], 0.02)
+        self.assertTrue(model.kwargs["use_sde"])
+        self.assertEqual(model.kwargs["sde_sample_freq"], 8)
+        np.testing.assert_array_equal(model.collected_rewards, -np.ones(256))
+        self.assertEqual(fake.validation.call_args.kwargs["eval_frequency"], 100_000)
+        report = json.loads((self.output / "training.json").read_text())
+        self.assertEqual(report["config"]["reward_scale"], 1.0)
+        self.assertEqual(report["config"]["target_kl"], 0.02)
+        self.assertEqual(report["config"]["vec_env_backend"], "dummy")
+        self.assertEqual(set(report["phase_seconds"]), {
+            "rollout_including_callbacks", "optimization", "diagnostics", "validation", "heldout",
+        })
+
+    def test_kl_stopped_epoch_still_counts_an_actual_rollout_update(self):
+        with self.fake_full_training(), patch.object(RolloutRoundingPPO, "early_stop_epochs", 1):
+            train.main([
+                "--timesteps", "2048", "--target-kl", "0.01", "--output", str(self.output),
+            ])
+        report = json.loads((self.output / "training.json").read_text())
+        self.assertEqual(report["optimization_epochs"], 1)
+        self.assertEqual(report["update_count"], 1)
+        self.assertEqual(report["optimizer_steps"], 8)
+
+    def test_subproc_backend_uses_spawn_and_closes_on_completion(self):
+        vectors = []
+
+        def local_vector(factories, *, start_method):
+            self.assertEqual(start_method, "spawn")
+            vector = train.DummyVecEnv(factories)
+            vector.seed = MagicMock(wraps=vector.seed)
+            vector.close = MagicMock(wraps=vector.close)
+            vectors.append(vector)
+            return vector
+
+        with self.fake_full_training(), patch.object(train, "SubprocVecEnv", side_effect=local_vector):
+            train.main([
+                "--timesteps", "512", "--envs", "2", "--vec-env", "subproc",
+                "--output", str(self.output),
+            ])
+        self.assertEqual(len(vectors), 1)
+        self.assertEqual(vectors[0].num_envs, 2)
+        vectors[0].seed.assert_called_once_with(42)
+        vectors[0].close.assert_called_once()
+        self.assertTrue(all(env.closed for env in CountingEnvironment.instances))
+
+    def test_vector_is_closed_and_failure_recorded_if_seeding_fails(self):
+        vector = MagicMock()
+        vector.seed.side_effect = RuntimeError("seed failed")
+        with self.fake_full_training(), patch.object(train, "DummyVecEnv", return_value=vector):
+            with self.assertRaisesRegex(RuntimeError, "seed failed"):
+                train.main(["--timesteps", "256", "--output", str(self.output)])
+        vector.close.assert_called_once()
+        report = json.loads((self.output / "training.json").read_text())
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["optimizer_steps"], 0)
+
+    def test_worker_cleanup_error_does_not_skip_logger_or_evaluation_cleanup(self):
+        def local_vector(factories, *, start_method):
+            vector = train.DummyVecEnv(factories)
+            original_close = vector.close
+
+            def fail_after_closing():
+                original_close()
+                raise RuntimeError("worker cleanup failed")
+
+            vector.close = fail_after_closing
+            return vector
+
+        with self.fake_full_training() as fake, patch.object(train, "SubprocVecEnv", side_effect=local_vector):
+            with self.assertRaisesRegex(RuntimeError, "worker cleanup failed"):
+                train.main([
+                    "--timesteps", "256", "--envs", "1", "--vec-env", "subproc",
+                    "--output", str(self.output),
+                ])
+        RolloutRoundingPPO.instances[0].logger.close.assert_called_once()
+        fake.validation.return_value.eval_env.close.assert_called_once()
+        self.assertTrue(all(env.closed for env in CountingEnvironment.instances))
+
+    def test_invalid_experiment_options_fail_before_creating_any_output(self):
+        for options in (
+            ["--reward-scale", "0"], ["--reward-scale", "nan"], ["--reward-scale", "inf"],
+            ["--learning-rate", "-0.1"], ["--n-epochs", "0"], ["--target-kl", "0"],
+            ["--sde-sample-freq", "0"], ["--sde-sample-freq", "8"],
+            ["--viewer", "--vec-env", "subproc"], ["--trial", "--vec-env", "subproc"],
+            ["--trial", "--target-kl", "0.01"],
+        ):
+            with (
+                self.subTest(options=options),
+                patch.object(train, "training_output") as destination,
+                patch.object(train, "SO101ReachEnv") as environment,
+                patch.object(train, "PPO") as policy,
+                redirect_stderr(io.StringIO()),
+            ):
+                with self.assertRaises(SystemExit) as caught:
+                    train.main(["--output", str(self.output), *options])
+                self.assertEqual(caught.exception.code, 2)
+                destination.assert_not_called()
+                environment.assert_not_called()
+                policy.assert_not_called()
+
+
+class ValidationMetricsTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = TemporaryDirectory(prefix="so101-validation-metrics-")
+        self.addCleanup(self.temporary.cleanup)
+        with patch.object(train, "SO101ReachEnv", CountingEnvironment):
+            self.callback = train.FixedSeedEvaluation(
+                Path(self.temporary.name), {"raw_environment": True}, {"reward_scale": 0.01},
+                eval_episodes=2, start_time=0,
+                progress=lambda: {"optimizer_steps": 4, "update_count": 1},
+            )
+        self.addCleanup(self.callback.eval_env.close)
+        self.logger = MagicMock()
+        self.callback.init_callback(SimpleNamespace(logger=self.logger, get_env=lambda: None))
+        self.callback.num_timesteps = 100_000
+
+    def test_validation_uses_unscaled_env_and_counts_actual_steps_and_time(self):
+        report = {
+            "summary": {"episodes": 2, "successes": 1, "success_rate": 0.5,
+                        "mean_final_distance_m": 0.02, "mean_return": -7.0},
+            "episodes": [{"steps": 3}, {"steps": 7}],
+        }
+        with (
+            patch.object(train, "run_episodes", return_value=report) as episodes,
+            patch.object(train, "save_checkpoint") as checkpoint,
+            patch("so101_sim.train.time.perf_counter", side_effect=[10, 12.5, 13, 14]),
+            redirect_stdout(io.StringIO()),
+        ):
+            self.callback.evaluate()
+        self.assertIsInstance(episodes.call_args.args[0], CountingEnvironment)
+        self.assertEqual(self.callback.eval_env.step_calls, 0)
+        self.assertEqual(self.callback.validation_seconds, 2.5)
+        self.assertEqual(self.callback.validation_steps, 10)
+        self.assertEqual(self.callback.validation_episodes, 2)
+        metadata = checkpoint.call_args.args[3]
+        self.assertEqual(metadata["optimizer_steps"], 4)
+        self.assertEqual(metadata["reward_scale"], 0.01)
+        with (Path(self.temporary.name) / "evaluations.csv").open(encoding="utf-8") as handle:
+            row = next(csv.DictReader(handle))
+        self.assertEqual(float(row["mean_return"]), -7)
+        self.assertEqual(float(row["evaluation_seconds"]), 2.5)
+        self.assertEqual(int(row["validation_control_steps"]), 10)
+
+    def test_failed_validation_retains_elapsed_time_without_inventing_counts(self):
+        with (
+            patch.object(train, "run_episodes", side_effect=RuntimeError("evaluation interrupted")),
+            patch("so101_sim.train.time.perf_counter", side_effect=[2, 4]),
+            self.assertRaisesRegex(RuntimeError, "evaluation interrupted"),
+        ):
+            self.callback.evaluate()
+        self.assertEqual(self.callback.validation_seconds, 2)
+        self.assertEqual(self.callback.validation_steps, 0)
+        self.assertEqual(self.callback.validation_episodes, 0)
+
+    def test_distance_and_hold_diagnostics_use_existing_rollout_info_only(self):
+        self.callback._on_rollout_start()
+        self.callback.locals = {"infos": [
+            {"distance": 0.01, "hold_steps": 3},
+            {"distance": 0.05, "hold_steps": 0},
+            {"distance": 0.10, "hold_steps": 0},
+        ]}
+        self.callback.num_timesteps = 8
+        self.callback._on_step()
+        self.callback._on_rollout_end()
+        metrics = {call.args[0]: call.args[1] for call in self.logger.record.call_args_list}
+        self.assertEqual(metrics["rollout/maximum_hold_steps"], 3)
+        self.assertEqual(metrics["rollout/within_15mm_fraction"], 1 / 3)
+        self.assertEqual(metrics["rollout/within_80mm_fraction"], 2 / 3)
+        self.assertEqual(self.callback.eval_env.step_calls, 0)
 
 
 if __name__ == "__main__":

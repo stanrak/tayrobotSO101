@@ -52,6 +52,7 @@ class ExperimentTests(unittest.TestCase):
         files = {
             "so101_sim/env.py": b"environment source\n",
             "so101_sim/train.py": b"trainer source\n",
+            "so101_sim/learning.py": b"learning diagnostics source\n",
             "requirements.txt": b"numpy==test\n",
             "assets/model_manifest.json": b"{}\n",
             "instructions/instruction.md": b"project rules\n",
@@ -77,6 +78,8 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(record["command"][-2:], ["--seed", "42"])
         self.assertEqual(record["source_files_sha256"]["so101_sim/env.py"],
                          hashlib.sha256(files["so101_sim/env.py"]).hexdigest())
+        self.assertEqual(record["source_files_sha256"]["so101_sim/learning.py"],
+                         hashlib.sha256(files["so101_sim/learning.py"]).hexdigest())
         for name in record["source_files_sha256"]:
             self.assertEqual((directory / "source" / name).read_bytes(), files[name])
         self.assertFalse((directory / "source/.env").exists())
@@ -153,6 +156,70 @@ class ExperimentTests(unittest.TestCase):
         self.assertNotIn("success_rate", rows[0])
         self.assertNotIn("eval_kind", rows[0])
         self.assertEqual(rows[0]["optimizer_steps"], 2)
+
+    def test_catalog_compares_learning_settings_counts_and_measured_phase_times(self):
+        legacy = self.root / "history/legacy"
+        recent = self.root / "experiments/recent"
+        self.training(legacy)
+        training = self.training(recent)
+        settings = {
+            "reward_scale": 0.01, "vec_env_backend": "subproc", "target_kl": 0.015,
+            "use_sde": False, "sde_sample_freq": -1,
+        }
+        training["config"].update(settings)
+        training.update({
+            "update_count": 1, "optimization_epochs": 3,
+            "phase_seconds": {"rollout_including_callbacks": 2.0, "optimization": 0.5, "diagnostics": 0.1,
+                              "validation": 0.0, "heldout": 1.0},
+        })
+        self.write_json(recent / "training.json", training)
+        before = (recent / "training.json").read_bytes()
+        rows = experiments.refresh_catalog(self.root)
+        by_path = {row["path"]: row for row in rows}
+        row = by_path["experiments/recent"]
+        for key, value in settings.items():
+            self.assertEqual(row[key], value)
+        measured = {
+            "update_count": 1, "optimization_epochs": 3,
+            "rollout_seconds_including_callbacks": 2.0, "optimization_seconds": 0.5, "diagnostics_seconds": 0.1,
+            "validation_seconds": 0.0, "heldout_seconds": 1.0,
+        }
+        for key, value in measured.items():
+            self.assertEqual(row[key], value)
+        for key in (*settings, *measured):
+            self.assertEqual(by_path["history/legacy"][key], "")
+        with (self.root / "index.csv").open(newline="", encoding="utf-8") as handle:
+            indexed = {row["path"]: row for row in csv.DictReader(handle)}
+        self.assertEqual(indexed["experiments/recent"]["reward_scale"], "0.01")
+        self.assertEqual(indexed["experiments/recent"]["use_sde"], "False")
+        self.assertEqual(indexed["experiments/recent"]["validation_seconds"], "0.0")
+        self.assertEqual(indexed["history/legacy"]["validation_seconds"], "")
+        self.assertEqual((recent / "training.json").read_bytes(), before)
+
+    def test_finalization_retains_observed_phase_times_and_counts(self):
+        directory = self.root / "experiments/timed"
+        self.write_json(directory / "run.json", {"status": "running"})
+        training = self.training(directory, status="interrupted")
+        training.update({"update_count": 3, "optimization_epochs": 7,
+                         "phase_seconds": {"rollout_including_callbacks": 2.0,
+                                           "optimization": 0.5, "validation": 0.25,
+                                           "heldout": 0.0}})
+        self.write_json(directory / "training.json", training)
+        record = experiments.finish_run_record(directory, status="interrupted")
+        self.assertEqual(record["phase_seconds"], training["phase_seconds"])
+        self.assertEqual(record["update_count"], 3)
+        self.assertEqual(record["optimization_epochs"], 7)
+
+    def test_malformed_optional_phase_times_leave_metrics_unmeasured(self):
+        directory = self.root / "experiments/malformed-phases"
+        training = self.training(directory)
+        training["phase_seconds"] = []
+        self.write_json(directory / "training.json", training)
+        row = experiments.catalog_rows(self.root)[0]
+        self.assertEqual(row["rollout_seconds_including_callbacks"], "")
+        self.assertEqual(row["optimization_seconds"], "")
+        self.assertEqual(row["validation_seconds"], "")
+        self.assertEqual(row["heldout_seconds"], "")
 
     def test_standalone_evaluation_is_a_distinct_row(self):
         directory = self.root / "experiments/parent/evaluations/eval-a"

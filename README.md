@@ -123,7 +123,7 @@ To rebuild and view comparisons from saved records without running a policy:
 .\.venv\Scripts\python -m so101_sim.experiments
 ```
 
-Open `runs/index.csv` in a spreadsheet to compare seeds, task/environment/source fingerprints, code revisions, hyperparameters, step budgets, optimizer counts, duration, success rate, return, and final distance. Each evaluation row identifies its checkpoint hash and evaluation seeds. Compare matching task/environment signatures, evaluation seeds, and budgets; validation, held-out, and standalone results are labeled separately. Empty metrics mean they were not measured. A startup trial has no task-performance score, and a short diagnostic must not be ranked as a learned policy. The index is derived and can be regenerated; raw experiment files are retained.
+Open `runs/index.csv` in a spreadsheet to compare seeds, task/environment/source fingerprints, code revisions, hyperparameters, reward scale, environment backend, phase timings, step budgets, optimizer counts, success rate, return, and final distance. Each evaluation row identifies its checkpoint hash and evaluation seeds. Compare matching task/environment signatures, evaluation seeds, and budgets; validation, held-out, and standalone results are labeled separately. Empty metrics mean they were not measured. A startup trial has no task-performance score, and a short diagnostic must not be ranked as a learned policy. The index is derived and can be regenerated; raw experiment files are retained.
 
 To evaluate and view the latest policy without specifying a checkpoint path:
 
@@ -175,6 +175,37 @@ By default the observed environment is paced at real time. `--viewer-speed 4` di
 
 Mouse camera controls remain available. The viewer uses separate copies of the training model and data, so viewer physics controls cannot modify the robot used for learning. No keyboard task controller, scripted solver, or extra policy rollout is used. Close the viewer window or press Ctrl+C in the terminal to interrupt training. Full training saves `final_model.zip` inside that run's experiment directory with actual step and optimizer counts, records the interrupted status, and skips final evaluation. At a requested step limit, the viewer closes and full training completes its normal checkpoint evaluation.
 
+## Controlled training experiments and diagnostics
+
+Training now multiplies the environment reward by **0.01** before PPO receives it. The environment's reward formula, observations, controller, physics, success threshold, and target duration remain the same. Monitor episode returns, validation returns, and held-out returns use the original reward units. This fixed scale is a first experiment addressing the nearly constant critic observed in the saved run; it has not yet demonstrated improved task performance. It does not use running normalization statistics.
+
+For a bounded first experiment with the new scale:
+
+```powershell
+.\.venv\Scripts\python -m so101_sim.train --timesteps 307200 --seed 42
+```
+
+With eight environments and 256 steps per environment, this is 150 complete PPO rollouts. It is a full training experiment, including periodic validation and final held-out evaluation, rather than a startup trial. These example experiments have not been launched as part of implementing the changes.
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--reward-scale` | `0.01` | Positive finite multiplier applied only to PPO training rewards; use `1` for the previous scale. |
+| `--eval-frequency` | `100000` | Training transitions between validation rounds; each round still uses 20 fixed validation seeds by default. |
+| `--learning-rate` | `0.0003` | Positive finite PPO learning rate. |
+| `--n-epochs` | `10` | Optimization epochs per full-training rollout. A startup trial always uses one epoch and one batch. |
+| `--target-kl` | Unset | Optional positive KL threshold that can stop PPO optimization early; unavailable with `--trial`. |
+| `--use-sde` | Off | Enable state-dependent exploration as a separate experiment. |
+| `--sde-sample-freq` | `-1` | Positive control-step interval requires `--use-sde`; `-1` resamples only at rollout start. |
+| `--vec-env` | `dummy` | Choose sequential `dummy` or opt-in multiprocess `subproc` environments. |
+
+Change one setting at a time when comparing learning quality. For example, use a new run with `--learning-rate 0.0001` to test a lower learning rate, then a separate run with `--target-kl 0.01` to test an update limit. Keep the task, training budget, seed, and evaluation settings matched. Use `--reward-scale 1 --eval-frequency 25000` when reproducing the previous reward scale and validation cadence. A short pilot without success can still reveal progress in distance and critic learning; it does not prove the task has been learned.
+
+`progress.csv` includes critic value/target spread, sampled critic saturation, action clipping, exploration statistics, and rollout/optimization timing. Gradient norms are measured after SB3's gradient clipping. These diagnostics use the existing training batch and do not add policy interactions. `training.json` records `phase_seconds` for `rollout_including_callbacks`, `optimization`, `diagnostics`, `validation`, and `heldout`. Rollout timing includes periodic validation and viewer callbacks; sampled critic diagnostics are timed separately. Final validation occurs outside rollout collection, so neither adding nor subtracting the entire validation duration gives a disjoint breakdown. Validation time measures episode execution, and validation step/episode counts cover completed reports; interrupted partial validation retains elapsed time without inventing missing counts. Completed updates and successful optimizer calls are measured directly, including when a KL limit stops epochs early. `optimization_epochs` counts SB3 epochs entered, which can include a partial epoch stopped by KL; it is not a count of successful optimizer calls.
+
+To test CPU parallelism in a separate headless experiment, add `--vec-env subproc --envs 4` or `--vec-env subproc --envs 8`. Compare measured throughput before choosing a backend: process communication also costs time. `subproc` is rejected with `--viewer` or `--trial` before environments or output directories are created. Workers close when the run finishes, is interrupted, or raises an error.
+
+SAC, running reward/observation normalization with `VecNormalize`, observation extensions, and reward shaping remain possible follow-up experiments. They are not enabled by these options. Checkpoint compatibility checks and separate experiment records still apply; these changes do not resume or migrate historical policies.
+
 ## Desk, physical ball, and learning environment
 
 The workspace uses a fixed **120 × 70 × 75 cm desk** (width × depth × floor-to-top height), a common desk size matching the published [IKEA TROTTEN dimensions](https://www.ikea.com.tw/en/products/office-workspace/office-desks-and-tables/trotten-spr-39621918). This is a dimension reference, not a detailed replica or a universal furniture standard. The simulated desk has a 30 mm thick top and four fixed collision-enabled legs. The robot is mounted on the top at world position `[0, 0, 0.75]` m; the desktop spans x = −0.2…1.0 m and y = −0.35…0.35 m. Upstream robot files, joint dynamics, actuator limits, and meshes remain unchanged.
@@ -223,6 +254,7 @@ Earlier long-run checkpoints and reports already on this laptop remain under `ch
 | `so101_sim/teleop.py` | Laptop keyboard controls |
 | `so101_sim/env.py` | Initial robot environment and task |
 | `so101_sim/train.py` | Continuous training, optional step limit, and explicit first-update trial |
+| `so101_sim/learning.py` | Training reward scale and PPO diagnostics without extra interactions |
 | `assets/robotstudio_so101/` | Unmodified upstream robot assets |
 | `so101_sim/experiments.py` | Experiment provenance and saved-result comparisons |
 | `runs/experiments/` | Separate training records and nested evaluation records |
