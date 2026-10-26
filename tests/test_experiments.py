@@ -56,7 +56,12 @@ class ExperimentTests(unittest.TestCase):
             "requirements.txt": b"numpy==test\n",
             "assets/model_manifest.json": b"{}\n",
             "instructions/instruction.md": b"project rules\n",
+            "instructions/workflow.md": b"agent workflow\n",
+            "instructions/training.md": b"training contract\n",
+            "instructions/experiments.md": b"experiment contract\n",
+            "instructions/physical-contract.md": b"physical contract\n",
             "instructions/huongdan.md": b"user-owned guidance\n",
+            "private/huongdan.md": b"private fixture excluded from snapshots\n",
             ".env": b"SECRET=must-not-copy\n",
             "runs/older/training.json": b"old result\n",
         }
@@ -80,11 +85,17 @@ class ExperimentTests(unittest.TestCase):
                          hashlib.sha256(files["so101_sim/env.py"]).hexdigest())
         self.assertEqual(record["source_files_sha256"]["so101_sim/learning.py"],
                          hashlib.sha256(files["so101_sim/learning.py"]).hexdigest())
+        self.assertTrue({
+            "instructions/instruction.md", "instructions/workflow.md",
+            "instructions/training.md", "instructions/experiments.md",
+            "instructions/physical-contract.md",
+        }.issubset(record["source_files_sha256"]))
         for name in record["source_files_sha256"]:
             self.assertEqual((directory / "source" / name).read_bytes(), files[name])
         self.assertFalse((directory / "source/.env").exists())
         self.assertFalse((directory / "source/runs").exists())
         self.assertFalse((directory / "source/instructions/huongdan.md").exists())
+        self.assertFalse((directory / "source/private").exists())
         self.assertNotIn("environ", record)
         with self.assertRaises(FileExistsError):
             experiments.create_run_record(directory, mode="full_training", seed=42)

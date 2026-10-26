@@ -95,6 +95,8 @@ def _source_files() -> list[Path]:
     files = [ROOT / name for name in (
         "AGENTS.md", ".gitignore", "requirements.txt", "requirements-sim.txt",
         "assets/model_manifest.json", "instructions/instruction.md",
+        "instructions/workflow.md", "instructions/training.md",
+        "instructions/experiments.md", "instructions/physical-contract.md",
     )]
     for folder in ("so101_sim", "scripts"):
         files.extend((ROOT / folder).glob("*.py"))

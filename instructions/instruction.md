@@ -1,35 +1,29 @@
-## Current development and training scope
+# Agent instructions: entry point
 
-- Work on code and the initial simulation environment. Manual laptop keyboard control is the default application mode.
-- The existing `so101_sim.train` entry point now defaults to continuous user-started training. Agents must explicitly pass `--trial` for startup diagnostics; do not invoke the unrestricted default while implementing or verifying code. `--timesteps` alone limits full training and does not select a startup trial. Keep `--full-training` as a compatibility alias, and keep continuous training, optional exact step limits, and trials in the existing trainer file.
-- A startup trial may run only until the first actual network update. There is no fixed 500-transition ceiling. The agent may choose the initial number of steps according to the task, algorithm, rollout length, environment count, and any necessary warmup. Use the smallest reasonable amount of initial data needed to reach that update; 500 steps is only a convenience default.
-- Choose and explain the trial budget before a real trial, then record the requested and actual environment transitions, optimizer steps, and stopping reason. Count transitions across all environments, including warmup. An episode ending or a rollout completing is not itself a network update.
-- For this project, the first network update means one successful optimizer step on trainable network parameters. Stop after that step. Do not continue with another minibatch, optimization epoch, rollout, or update. For the current PPO trial, collect one selected rollout, use the complete rollout as one batch, and run one optimization epoch. Count actual optimizer calls rather than infer them from completed rollouts or epochs.
-- Code changes and unit tests do not automatically authorize a real training run. When a startup trial is needed within the authorized task, the agent may choose its step budget without asking again. Do not run long training, repeated trial searches, checkpoint selection, or automatic evaluation without a later explicit user request authorizing that work. A larger initial rollout is not permission to continue training after the first update.
-- Startup output is a diagnostic of initialization, observations, actions, reward, and the first update. It must not claim that the task has been learned. If the run fails before an update, record the observed steps and zero updates accurately.
-- Never perform the learning task on behalf of the policy. Do not add an IK solver, scripted task controller, teacher actions, or automatic task completion. Initial pose setup and reachable-goal sampling must not generate robot actions for the policy.
-- Keep existing experiment artifacts as historical records. Do not load them automatically when starting the simulation or a fresh startup trial.
+## Project
 
-## Instruction file ownership and Git
+This repository develops a MuJoCo simulation of the SO-101 robot and a PPO reach-and-hold learning task. The default application opens manual laptop keyboard control. Training, evaluation, and experiment inspection are separate entry points.
 
-- Do not modify `AGENTS.md`.
-- Write agent-maintained guidance inside the `instructions` folder. These instruction files may be versioned in Git.
+## Authority and preflight
 
-## Output locations
+- `private/` is the user-owned, highest-priority local project guide. Read it locally; never copy its contents into documentation, logs, source snapshots, version control, or external requests. Do not modify it.
+- `AGENTS.md` defines the active overall agent requirements and is immutable. Do not edit, overwrite, rename, or delete it.
+- Before code inspection or operational work, read and parse every file in `instructions/` and `private/`, as required by `AGENTS.md`. Reading this index alone does not satisfy that preflight.
+- If a planned action conflicts with private guidance, stop, explain the discrepancy without disclosing private contents, and await written user confirmation.
 
-- Each startup trial/full training invocation creates a unique `runs/experiments/<UTC timestamp>_<mode>_seed<seed>_<unique suffix>/` directory automatically. Ordinary commands omit `--output`; never reuse, move, or delete older experiment directories. Existing `runs/current`, `runs/history`, and other legacy records stay in place with their original bytes. A custom training output must be empty.
-- Record `run.json` provenance (command, seed, timestamps/status, Python/platform/packages, Git revision/dirty state, source hashes) and an exact allowlisted source/config snapshot, alongside the existing training settings, environment signatures, checkpoints, metrics, and actual transition/optimizer counts. Retain partial, failed, and interrupted runs accurately. No automatic policy loading or checkpoint migration is authorized.
-- `runs/latest.json` is an atomic convenience pointer to the latest managed training run; default checkpoint lookup follows it, falling back to legacy `runs/current` only when the pointer is absent. Invalid pointers must fail clearly. Each standalone evaluation has its own `evaluations/<evaluation_id>/` record next to its checkpoint; existing reports/custom output files must not be overwritten.
-- Maintain derived `runs/index.csv` comparisons from saved metadata, including legacy runs. Label held-out, validation, and standalone metrics separately; leave unmeasured fields blank and never assign learned task-performance scores to startup diagnostics. `python -m so101_sim.experiments` rebuilds the catalog without loading or rolling out policies. Compare matching tasks/environment signatures, evaluation seeds, and budgets.
-- Keep run results out of Git: ignore `runs/`, historical `checkpoints/`/`reports/`, and generated learning GIFs. Each new experiment must include a local ignore marker to cover custom output folders. Remove previously tracked result artifacts from the Git index without deleting their local bytes; ordinary runs do not rewrite commit history. Static simulation documentation images may remain versioned.
-- Respect output writer locks, including the existing `runs/.current.lock` for compatibility with active older processes. Do not bypass locks or mutate an active run. This output organization does not authorize training/evaluation beyond the scope above, and does not require a new dependency or tracking service.
+## Required instruction set
 
-## Fixed physical workspace contract
+| File | Agent responsibility |
+| --- | --- |
+| [workflow.md](workflow.md) | Scope, document ownership, editing, execution, confidentiality, and verification |
+| [training.md](training.md) | Training authorization, first-update trials, counters, reward scale, and diagnostics |
+| [experiments.md](experiments.md) | Output isolation, provenance, checkpoint compatibility, comparisons, and locks |
+| [physical-contract.md](physical-contract.md) | Fixed scene, physics, goal sampling, target cadence, and contact semantics |
 
-- The authorized surface-ball upgrade uses a fixed 1.2 x 0.7 x 0.75 m desk, with a 0.03 m top and four collision-enabled legs. The desk is centered at world x/y = [0.4, 0]; the robot base is mounted at [0, 0, 0.75] m. Compose this workspace in `so101_sim/env.py`; keep the pinned upstream robot assets and their manifest hashes unchanged.
-- The ball is a physical free body with radius 0.015 m and mass 0.02 kg. Explicit gravity is [0, 0, -9.81] m/s^2. Ball/support contacts use condim 6, friction [0.6, 0.005, 0.0005], and solref [0.002, 1]. Physics uses a 0.001 s timestep and up to 50 solver iterations; frame_skip 50 retains 20 Hz policy control. These are nominal, uncalibrated material parameters. Do not claim an exact real-material match.
-- Default resets place a stationary ball directly on the table within verified robot reach. Sample scratch FK poses inside the existing action limits, offset the ball centre 6-10 mm radially outward on the tabletop, and reject candidates beyond 14 mm end-effector distance or with contact penetration beyond 1 micrometre. Keep at least 40 mm initial robot-to-ball distance and 20 mm between consecutive automatic/manual-N targets; seeded resets reproduce independently of the previous target. Never expose generating joint angles in observations/info/controls or use them as robot actions.
-- The table-mounted arm cannot reach the floor. Exclude floor placements from default learning/manual sampling; `options={"ball_surface": "floor"}` remains an explicit physics diagnostic only. Keep these samples outside the desk footprint and legs. Do not silently move the robot, add a solver, migrate controllers, or expand the learning task to compensate. Never restore floating targets or pin/teleport the ball during simulation steps; goal observations and distances follow its physical motion.
-- Each target receives 1200 actual control steps per environment (60 simulated seconds at 20 Hz), across unseeded automatic resets and PPO rollouts. Early success/collision resets restore the same spawn while retaining this target count; truncate at the cumulative target boundary and resample on the next reset. Each attempt also has a 1200-step limit. Seeded reset starts a fresh reproducible target; `options={"new_target": True}` and manual N explicitly override dwell. These budgets do not authorize training or guarantee learning, and are separate from total trainer steps and startup-trial update limits.
-- Ball support and robot/ball contacts are permitted. Robot self-contact and contact with the table/floor still fail on penetration deeper than 4 mm. Keep the six robot joints/actuators separate from the ball's seven qpos and six qvel coordinates.
-- Geometry, physics, reachable placement, target cadence, contact filtering, and live goal tracking are locked by physical contract tests. Task `SO101ReachableSurfaceBall-v3` and checkpoint environment signatures record the changed semantics. Historical checkpoints remain incompatible and must not be migrated automatically. Further object/dynamics changes need a user request that authorizes those specific changes.
+## Documentation ownership
+
+- Root `README.md` is a concise project overview for human readers.
+- `docs/` contains human explanations, operation guides, technical references, and project stages. Readers must be able to understand those documents without consulting agent instructions or private files.
+- `AGENTS.md` and `instructions/` are written for agents. Put agent procedures and constraints here rather than in reader documentation.
+- Write agent-maintained documents in English. Keep user-owned files unchanged.
+- Keep this entry path stable. When instruction files are split or renamed, update local links and the explicit source snapshot allowlist without adding private or otherwise unapproved user-owned guidance.
