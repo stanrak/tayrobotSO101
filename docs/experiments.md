@@ -12,13 +12,13 @@ Every training or trial invocation creates a directory under:
 runs/experiments/<UTC timestamp>_<mode>_seed<seed>_<unique suffix>/
 ```
 
-Omitting `--output` selects this managed layout. A custom training output must be an empty directory. A new run starts a fresh policy and leaves older experiment directories at their original paths.
+Omitting `--output` selects this managed layout. A custom training output must be an empty directory. A run starts a fresh policy unless `--resume` explicitly selects a compatible checkpoint. Both modes leave older experiment directories at their original paths.
 
 | File or directory | Contents |
 | --- | --- |
-| `run.json` | Run identity, command, seed, timestamps/status, platform/packages, Git revision/state, source hashes, and observed counts. |
+| `run.json` | Run identity, command, seed, timestamps/status, platform/packages, Git revision/state, source hashes, parent lineage when resumed, and observed counts. |
 | `source/` | Exact allowlisted source/configuration snapshot recorded at run start. |
-| `training.json` | Training settings, environment signature, requested/actual transitions, optimizer/update counts, phase timings, and final status. |
+| `training.json` | Training settings, environment signature, requested/actual session transitions, starting/cumulative counters, parent lineage, phase timings, and final status. |
 | `progress.csv` | PPO, critic, action, task, and timing metrics. |
 | `monitor_*.csv.monitor.csv` | Per-environment episode records in original reward units. |
 | `best_model.zip` and metadata | Best checkpoint selected by fixed-seed validation. |
@@ -30,6 +30,25 @@ Omitting `--output` selects this managed layout. A custom training output must b
 Failed and interrupted runs retain the observed status and counts. An abrupt process kill can leave a previously recorded running status with partial logs. Missing evaluation metrics mean they were not measured, rather than zero performance.
 
 `runs/latest.json` is an atomic convenience pointer to the most recently started managed training run. It is not the best run across all history. The latest run's checkpoint lookup tries `best_model.zip`, then `trial_model.zip`, then `final_model.zip`. When the pointer is absent, lookup falls back to legacy `runs/current/`; an invalid pointer fails clearly. A recent failed run without a checkpoint can therefore require an explicit checkpoint path.
+
+## Continued-training lineage and counts
+
+`--resume CHECKPOINT` continues optimization from a checked full-training checkpoint. `--resume latest` resolves the existing pointer and checkpoint selection before the new run updates `runs/latest.json`. Because selection prefers `best_model.zip`, the starting count belongs to that selected checkpoint and can be earlier than the parent's final count. An explicit `final_model.zip` path selects the latest saved training state in that parent run instead.
+
+The parent checkpoint's bytes and metadata are retained. Continuation creates a new output directory and records:
+
+| Field | Meaning |
+| --- | --- |
+| `config.checkpoint_loaded` | Whether this run explicitly restored a checkpoint. |
+| `config.parent_checkpoint` / `parent_checkpoint_sha256` / `parent_run_id` | Identity of the selected parent state. |
+| `config.starting_timesteps` / `starting_optimizer_steps` / `starting_update_count` / `starting_optimization_epochs` | Cumulative counts at the selected checkpoint. |
+| `actual_timesteps` / `optimizer_steps` / `update_count` / `optimization_epochs` | Work observed in the new session only. |
+| `cumulative_timesteps` / `cumulative_optimizer_steps` / `cumulative_update_count` / `cumulative_optimization_epochs` | Parent baseline plus observed work in this session. |
+| `phase_seconds` | Timing accumulated only in this session. |
+
+For example, a 300,000-transition checkpoint followed by a 200,000-transition session yields `actual_timesteps=200000` and `cumulative_timesteps=500000`. Counts refer to the selected checkpoint, not all independent runs stored on disk. Legacy records without measured cumulative or lineage fields remain blank in comparisons; no values are invented by summing unrelated runs.
+
+Checkpoint ZIPs preserve policy weights and optimizer state, while logs and evaluation scores remain records rather than a replay dataset. A resumed session starts fresh environment trajectories using its seed. State restoration checks hashes, task/environment/assets, package versions, reward scale, optimizer availability, and continuation counters. Unsupported older states fail clearly and are not automatically migrated. See [Training](training.md) for commands and compatible settings.
 
 ## Validation and held-out results
 
@@ -78,7 +97,7 @@ Reports identify the checkpoint by path and SHA256. Existing reports are retaine
 .\.venv\Scripts\python -m so101_sim.experiments
 ```
 
-This rebuilds `runs/index.csv` from saved metadata and reports. It does not load a policy or generate new task measurements. The derived table includes legacy and managed runs, learning settings, reward scale, backend, source/environment fingerprints, budgets, actual counts, phase timings, and measured metrics. Each evaluation row identifies its kind, checkpoint hash, and seeds.
+This rebuilds `runs/index.csv` from saved metadata and reports. It does not load a policy or generate new task measurements. The derived table includes legacy and managed runs, learning settings, reward scale, backend, source/environment fingerprints, parent lineage, session/cumulative counts, budgets, phase timings, and measured metrics. Each evaluation row identifies its kind, checkpoint hash, and seeds.
 
 Compare matching task/environment signatures and evaluation seeds at comparable budgets. Validation, held-out, and standalone results are labeled separately. Startup diagnostics have blank task-performance metrics. A result from an older task version cannot serve as a directly comparable success-rate baseline for the physical ball task.
 

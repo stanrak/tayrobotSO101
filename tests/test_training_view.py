@@ -79,6 +79,19 @@ class TrainingViewerTests(unittest.TestCase):
             self.assertTrue(self.callback._on_step())
         self.assertIn("Training steps: 600,000/unlimited", self.output.getvalue())
 
+    def test_resumed_status_distinguishes_new_session_steps_and_cumulative_steps(self):
+        self.callback.progress = lambda: {
+            "optimizer_steps": 2, "starting_timesteps": 300_000,
+            "actual_timesteps": 800, "session_environment_step_limit": 200_000,
+        }
+        self.callback.num_timesteps = 300_800
+        self.callback.model._total_timesteps = 500_000
+        with patch.object(self.env, "step", side_effect=AssertionError("Observer took an action")), patch("time.sleep"):
+            self.callback._on_step()
+        self.assertIn("Session steps: 800/200,000", self.output.getvalue())
+        self.assertIn("cumulative steps: 300,800/500,000", self.output.getvalue())
+        self.assertIn("network updates: 2", self.output.getvalue())
+
     def test_status_reports_target_age_without_advancing_training(self):
         self.callback.locals["infos"] = [{
             "distance": 0.05,

@@ -76,6 +76,7 @@ class RolloutRoundingPPO:
         self.learn_budgets = []
         self.completed_rollouts = 0
         self.rollout_update_count = 0
+        self.diagnostic_optimizer_steps = 0
         self.rollout_seconds = 0.0
         self.optimization_seconds = 0.0
         self.diagnostics_seconds = 0.0
@@ -89,9 +90,12 @@ class RolloutRoundingPPO:
     def get_env(self):
         return self.env
 
-    def learn(self, total_timesteps, callback=None, log_interval=None):
+    def learn(self, total_timesteps, callback=None, log_interval=None, reset_num_timesteps=True):
         self.callback = callback
         self.learn_budgets.append(total_timesteps)
+        self.reset_num_timesteps = reset_num_timesteps
+        if not reset_num_timesteps:
+            total_timesteps += self.num_timesteps
         self._total_timesteps = total_timesteps
         self.env.reset()
         if callback is not None:
@@ -121,6 +125,7 @@ class RolloutRoundingPPO:
             for _ in range(epochs):
                 for _ in range(batch_count):
                     self.policy.optimizer.step()
+                    self.diagnostic_optimizer_steps += 1
                 self._n_updates += 1
             self.completed_rollouts += 1
             self.rollout_update_count += 1
@@ -205,6 +210,48 @@ class StartupTrialTests(unittest.TestCase):
                 checkpoint=checkpoint, validation=validation, evaluate=evaluate,
                 episodes=episodes, viewer=viewer,
             )
+
+    def resume_record(self, **changes):
+        training = {
+            "mode": "full_training", **train.LEARNING_DEFAULTS, "reward_scale": 0.01,
+            "n_steps": 256, "batch_size": 256, "gamma": 0.99, "gae_lambda": 0.95,
+            "clip_range": 0.2, "ent_coef": 0.0, "vf_coef": 0.5, "max_grad_norm": 0.5,
+            "policy_net_arch": [64, 64], "observation_normalization": False,
+            "reward_normalization": False, **changes,
+        }
+        return SimpleNamespace(
+            path=Path(self.temporary.name) / "parent" / "final_model.zip",
+            metadata={"checkpoint_sha256": "parent-digest"}, training=training,
+            counters={"timesteps": 300_000, "optimizer_steps": 11_680,
+                      "update_count": 146, "optimization_epochs": 1460},
+        )
+
+    @contextmanager
+    def fake_resume_training(self, record=None):
+        record = record or self.resume_record()
+
+        def restore(checkpoint, vector, *, seed):
+            self.assertIs(checkpoint, record)
+            model = RolloutRoundingPPO("MlpPolicy", vector, **record.training)
+            model.num_timesteps = record.counters["timesteps"]
+            model._n_updates = record.counters["optimization_epochs"]
+            model.rollout_update_count = record.counters["update_count"]
+            model.diagnostic_optimizer_steps = record.counters["optimizer_steps"]
+            model.policy.optimizer.step_calls = record.counters["optimizer_steps"]
+            return model
+
+        with (
+            self.fake_full_training() as fake,
+            patch.object(train, "inspect_resume_checkpoint", return_value=record) as inspect,
+            patch.object(train, "load_resume_policy", side_effect=restore) as load,
+            patch.object(train, "PPO", side_effect=AssertionError("Resume initialized a fresh policy")) as fresh,
+        ):
+            # Include the actual progress callback in saved checkpoint metadata.
+            fake.validation.return_value.training_metadata.side_effect = lambda: {
+                **fake.validation.call_args.args[2],
+                **fake.validation.call_args.kwargs["progress"](),
+            }
+            yield SimpleNamespace(record=record, fake=fake, inspect=inspect, load=load, fresh=fresh)
 
     def test_default_trial_has_exactly_500_total_transitions_and_one_update(self):
         checkpoint, validation, evaluate, episodes = self.run_fake_trial()
@@ -629,6 +676,139 @@ class StartupTrialTests(unittest.TestCase):
                 environment.assert_not_called()
                 policy.assert_not_called()
 
+    def test_resume_adds_a_complete_rollout_to_an_unaligned_parent_count(self):
+        with self.fake_resume_training() as resumed:
+            train.main([
+                "--resume", str(resumed.record.path), "--timesteps", "2048",
+                "--output", str(self.output),
+            ])
+        model = RolloutRoundingPPO.instances[0]
+        self.assertEqual(model.learn_budgets, [2048])
+        self.assertFalse(model.reset_num_timesteps)
+        self.assertEqual(model.num_timesteps, 302_048)
+        self.assertEqual(model.policy.optimizer.step_calls, 11_760)
+        self.assertEqual(sum(env.step_calls for env in CountingEnvironment.instances), 2048)
+        resumed.load.assert_called_once()
+        resumed.fresh.assert_not_called()
+        report = json.loads((self.output / "training.json").read_text())
+        self.assertTrue(report["config"]["checkpoint_loaded"])
+        self.assertEqual(report["config"]["parent_checkpoint_sha256"], "parent-digest")
+        self.assertEqual(report["config"]["starting_timesteps"], 300_000)
+        self.assertEqual(report["actual_timesteps"], 2048)
+        self.assertEqual(report["cumulative_timesteps"], 302_048)
+        self.assertEqual(report["update_count"], 1)
+        self.assertEqual(report["cumulative_update_count"], 147)
+        self.assertEqual(report["optimizer_steps"], 80)
+        self.assertEqual(report["cumulative_optimizer_steps"], 11_760)
+        self.assertEqual(report["optimization_epochs"], 10)
+        self.assertEqual(report["cumulative_optimization_epochs"], 1470)
+        saved = resumed.fake.checkpoint.call_args.args[3]
+        self.assertEqual(saved["actual_timesteps"], 2048)
+        self.assertEqual(saved["cumulative_timesteps"], 302_048)
+
+    def test_resume_stops_at_exact_session_cap_and_discards_partial_rollout(self):
+        with self.fake_resume_training() as resumed:
+            train.main([
+                "--resume", str(resumed.record.path), "--timesteps", "2056",
+                "--output", str(self.output),
+            ])
+        report = json.loads((self.output / "training.json").read_text())
+        self.assertEqual(report["actual_timesteps"], 2056)
+        self.assertEqual(report["cumulative_timesteps"], 302_056)
+        self.assertEqual(report["optimizer_steps"], 80)
+        self.assertEqual(report["update_count"], 1)
+        self.assertEqual(sum(env.step_calls for env in CountingEnvironment.instances), 2056)
+
+    def test_resume_inherits_saved_learning_settings_and_requires_explicit_reward_units(self):
+        record = self.resume_record(learning_rate=0.0001, n_epochs=5, target_kl=0.01,
+                                    use_sde=True, sde_sample_freq=8, log_std_init=-2.5,
+                                    reward_scale=1.0)
+        with self.fake_resume_training(record):
+            train.main([
+                "--resume", str(record.path), "--reward-scale", "1", "--timesteps", "2048",
+                "--output", str(self.output),
+            ])
+        report = json.loads((self.output / "training.json").read_text())
+        for key in train.LEARNING_DEFAULTS:
+            self.assertEqual(report["config"][key], record.training[key])
+        self.assertEqual(report["optimizer_steps"], 40)
+        np.testing.assert_allclose(RolloutRoundingPPO.instances[0].collected_rewards, -1)
+
+    def test_resume_rejects_changed_learning_or_reward_settings_before_output(self):
+        record = self.resume_record(learning_rate=0.0001)
+        for options in (["--learning-rate", "0.0003"], ["--reward-scale", "1"],
+                        ["--n-epochs", "5"], ["--use-sde"], ["--target-kl", "0.01"]):
+            with (
+                self.subTest(options=options), self.fake_resume_training(record) as resumed,
+                patch.object(train, "training_output") as destination,
+                redirect_stderr(io.StringIO()), self.assertRaises(SystemExit),
+            ):
+                train.main(["--resume", str(record.path), *options])
+            destination.assert_not_called()
+            resumed.load.assert_not_called()
+
+    def test_resume_latest_resolves_parent_before_replacing_latest_pointer(self):
+        parent = Path(self.temporary.name) / "runs" / "experiments" / "parent"
+        parent.mkdir(parents=True)
+        checkpoint = parent / "best_model.zip"
+        checkpoint.write_bytes(b"parent remains unchanged")
+        pointer = parent.parent.parent / "latest.json"
+        pointer.write_text(json.dumps({"schema_version": 1, "path": "experiments/parent"}))
+        record = self.resume_record()
+        record.path = checkpoint.resolve()
+        with self.fake_resume_training(record) as resumed:
+            train.main(["--resume", "latest", "--timesteps", "2048"])
+        resumed.inspect.assert_called_once_with(checkpoint.resolve(), {"fake": True})
+        output = outputs.current_output()
+        self.assertNotEqual(output, parent.resolve())
+        self.assertEqual(checkpoint.read_bytes(), b"parent remains unchanged")
+        report = json.loads((output / "training.json").read_text())
+        self.assertEqual(report["config"]["parent_checkpoint"], str(checkpoint.resolve()))
+
+    def test_interrupted_resume_keeps_session_and_parent_counters(self):
+        with self.fake_resume_training() as resumed, patch.object(RolloutRoundingPPO, "interrupt_after_rollouts", 1):
+            with self.assertRaises(KeyboardInterrupt):
+                train.main(["--resume", str(resumed.record.path), "--output", str(self.output)])
+        report = json.loads((self.output / "training.json").read_text())
+        self.assertEqual(report["status"], "interrupted")
+        self.assertEqual(report["actual_timesteps"], 2048)
+        self.assertEqual(report["cumulative_timesteps"], 302_048)
+        self.assertEqual(report["optimizer_steps"], 80)
+        self.assertEqual(report["cumulative_optimizer_steps"], 11_760)
+        resumed.fake.evaluate.assert_not_called()
+        metadata = resumed.fake.checkpoint.call_args.args[3]
+        self.assertEqual(metadata["actual_timesteps"], 2048)
+        self.assertEqual(metadata["cumulative_timesteps"], 302_048)
+
+    def test_resume_load_failure_is_recorded_without_falling_back_to_fresh(self):
+        with self.fake_resume_training() as resumed, redirect_stderr(io.StringIO()):
+            resumed.load.side_effect = train.ResumeError("restore failed")
+            with self.assertRaises(SystemExit):
+                train.main([
+                    "--resume", str(resumed.record.path), "--timesteps", "2048",
+                    "--output", str(self.output),
+                ])
+        report = json.loads((self.output / "training.json").read_text())
+        self.assertEqual(report["status"], "failed")
+        self.assertFalse(report["config"]["checkpoint_loaded"])
+        self.assertEqual(report["actual_timesteps"], 0)
+        self.assertEqual(report["cumulative_timesteps"], 300_000)
+        resumed.fresh.assert_not_called()
+        resumed.fake.checkpoint.assert_not_called()
+        self.assertTrue(all(env.closed for env in CountingEnvironment.instances))
+
+    def test_trial_rejects_resume_before_inspection_or_output(self):
+        with (
+            patch.object(train, "inspect_resume_checkpoint") as inspect,
+            patch.object(train, "training_output") as destination,
+            patch.object(train, "SO101ReachEnv") as environment,
+            redirect_stderr(io.StringIO()), self.assertRaises(SystemExit),
+        ):
+            train.main(["--trial", "--resume", "latest"])
+        inspect.assert_not_called()
+        destination.assert_not_called()
+        environment.assert_not_called()
+
 
 class ValidationMetricsTests(unittest.TestCase):
     def setUp(self):
@@ -698,6 +878,22 @@ class ValidationMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["rollout/within_15mm_fraction"], 1 / 3)
         self.assertEqual(metrics["rollout/within_80mm_fraction"], 2 / 3)
         self.assertEqual(self.callback.eval_env.step_calls, 0)
+
+    def test_resumed_validation_waits_for_session_frequency_and_saves_session_counts(self):
+        self.callback.starting_timesteps = 300_000
+        self.callback.next_evaluation = 400_000
+        self.callback.locals = {"infos": []}
+        with patch.object(self.callback, "evaluate") as evaluate:
+            self.callback.num_timesteps = 300_008
+            self.callback._on_step()
+            evaluate.assert_not_called()
+            self.callback.num_timesteps = 400_000
+            self.callback._on_step()
+            evaluate.assert_called_once()
+        metadata = self.callback.training_metadata()
+        self.assertEqual(metadata["actual_timesteps"], 100_000)
+        self.assertEqual(metadata["cumulative_timesteps"], 400_000)
+        self.assertEqual(self.callback.next_evaluation, 500_000)
 
 
 if __name__ == "__main__":

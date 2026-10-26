@@ -20,11 +20,39 @@ import torch
 from .env import SO101ReachEnv
 from .evaluate import environment_signature, evaluate_checkpoint, run_episodes, save_checkpoint, write_json
 from .learning import DiagnosticPPO as PPO, RewardScale
-from .outputs import OutputError, training_output
+from .outputs import OutputError, current_checkpoint, training_output
+from .resume import ResumeError, inspect_resume_checkpoint, load_resume_policy
 from .vector_env import ManagedSubprocVecEnv as SubprocVecEnv
 
 
 DEFAULT_TRIAL_TIMESTEPS = 500
+LEARNING_DEFAULTS = {
+    "log_std_init": -2.0, "learning_rate": 0.0003, "n_epochs": 10,
+    "target_kl": None, "use_sde": False, "sde_sample_freq": -1,
+}
+
+
+def _inherit_resume_settings(args, checkpoint, provided: set[str]) -> None:
+    for key, default in LEARNING_DEFAULTS.items():
+        saved = checkpoint.training.get(key, default)
+        if key in provided and getattr(args, key) != saved:
+            raise ResumeError(f"Resume must preserve {key}={saved!r}; omit the conflicting option or start a fresh experiment.")
+        setattr(args, key, saved)
+    saved_scale = checkpoint.training["reward_scale"]
+    if args.reward_scale != saved_scale:
+        raise ResumeError(
+            f"Reward scale mismatch: checkpoint uses {saved_scale}, requested {args.reward_scale}. "
+            f"Use --reward-scale {saved_scale} to retain its critic/optimizer units; conversion is not supported."
+        )
+    fixed = {
+        "n_steps": 256, "batch_size": 256, "gamma": 0.99, "gae_lambda": 0.95,
+        "clip_range": 0.2, "ent_coef": 0.0, "vf_coef": 0.5, "max_grad_norm": 0.5,
+        "policy_net_arch": [64, 64], "observation_normalization": False,
+        "reward_normalization": False,
+    }
+    differences = [key for key, value in fixed.items() if checkpoint.training.get(key) != value]
+    if differences:
+        raise ResumeError("Checkpoint training settings are unsupported by this trainer: " + ", ".join(differences))
 
 
 def _finite_float(value: str) -> float:
@@ -64,9 +92,10 @@ class _OptimizerStepCounter:
 class _TrainingStepLimit(BaseCallback):
     """Stop at an exact transition budget while allowing complete rollout updates."""
 
-    def __init__(self, limit: int, rollout_size: int):
+    def __init__(self, limit: int, rollout_size: int, *, starting_timesteps: int = 0):
         super().__init__()
-        self.limit = limit
+        self.limit = starting_timesteps + limit
+        self.session_limit = limit
         self.rollout_size = rollout_size
 
     def _on_step(self) -> bool:
@@ -77,7 +106,7 @@ class _TrainingStepLimit(BaseCallback):
         # SB3 checks callbacks before adding the latest transition to its buffer.
         # A complete final rollout must return True so PPO can optimize it;
         # otherwise discard the incomplete rollout and stop without overshooting.
-        return self.limit % self.rollout_size == 0
+        return self.session_limit % self.rollout_size == 0
 
 
 class FixedSeedEvaluation(BaseCallback):
@@ -93,6 +122,7 @@ class FixedSeedEvaluation(BaseCallback):
         eval_episodes: int = 20,
         start_time: float,
         progress=lambda: {},
+        starting_timesteps: int = 0,
     ):
         super().__init__()
         self.output = output
@@ -100,7 +130,8 @@ class FixedSeedEvaluation(BaseCallback):
         self.training_config = training_config
         self.eval_frequency = eval_frequency
         self.eval_seeds = list(range(10_000, 10_000 + eval_episodes))
-        self.next_evaluation = eval_frequency
+        self.starting_timesteps = starting_timesteps
+        self.next_evaluation = starting_timesteps + eval_frequency
         self.start_time = start_time
         self.progress = progress
         self.validation_seconds = 0.0
@@ -116,7 +147,8 @@ class FixedSeedEvaluation(BaseCallback):
         return {
             **self.training_config,
             **self.progress(),
-            "actual_timesteps": self.num_timesteps,
+            "actual_timesteps": self.num_timesteps - self.starting_timesteps,
+            "cumulative_timesteps": self.num_timesteps,
             "elapsed_seconds": time.perf_counter() - self.start_time,
             "validation_seeds": self.eval_seeds,
         }
@@ -132,7 +164,8 @@ class FixedSeedEvaluation(BaseCallback):
         self.validation_steps += sum(episode["steps"] for episode in report["episodes"])
         summary = report["summary"]
         row = {
-            "timesteps": self.num_timesteps,
+            "timesteps": self.num_timesteps - self.starting_timesteps,
+            "cumulative_timesteps": self.num_timesteps,
             "elapsed_seconds": time.perf_counter() - self.start_time,
             "evaluation_seconds": evaluation_seconds,
             "validation_seconds": self.validation_seconds,
@@ -154,14 +187,18 @@ class FixedSeedEvaluation(BaseCallback):
         if self.best_score is None or score > self.best_score:
             self.best_score = score
             save_checkpoint(self.model, self.output / "best_model.zip", self.signature, self.training_metadata())
-            write_json(self.output / "best_validation.json", {"timesteps": self.num_timesteps, **report})
+            write_json(self.output / "best_validation.json", {
+                "timesteps": self.num_timesteps - self.starting_timesteps,
+                "cumulative_timesteps": self.num_timesteps, **report,
+            })
         self.last_evaluation = self.num_timesteps
         self.logger.record("validation/success_rate", summary["success_rate"])
         self.logger.record("validation/mean_final_distance_m", summary["mean_final_distance_m"])
         self.logger.record("validation/mean_return", summary["mean_return"])
         self.logger.record("time/validation_seconds", self.validation_seconds)
         self.logger.record("validation/control_steps", self.validation_steps)
-        print(f"Validation at {self.num_timesteps:,} steps: "
+        print(f"Validation at {self.num_timesteps - self.starting_timesteps:,} session steps "
+              f"({self.num_timesteps:,} cumulative): "
               f"{summary['successes']}/{summary['episodes']} successes, "
               f"mean final distance {summary['mean_final_distance_m'] * 1000:.1f} mm", flush=True)
         return report
@@ -182,6 +219,8 @@ class FixedSeedEvaluation(BaseCallback):
         self.rollout_max_hold = 0
 
     def _on_rollout_end(self) -> None:
+        self.logger.record("time/session_timesteps", self.num_timesteps - self.starting_timesteps)
+        self.logger.record("time/cumulative_timesteps", self.num_timesteps)
         if self.rollout_distances:
             count = len(self.rollout_distances)
             self.logger.record("rollout/mean_distance_m", sum(self.rollout_distances) / count)
@@ -210,9 +249,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--timesteps", type=int,
-        help="Stop after this many total training transitions (default: unlimited). With --trial: rollout budget before the first network update (at least 2; default: 500).",
+        help="New training transitions in this session (default: unlimited); with --resume these are additional steps. With --trial: rollout budget before the first network update (at least 2; default: 500).",
     )
     parser.add_argument("--output", type=Path, help="Optional custom empty directory. Default: a new experiment directory under runs/experiments for every invocation.")
+    parser.add_argument("--resume", metavar="CHECKPOINT", help="Continue a full-training checkpoint, or 'latest'. --timesteps counts additional transitions; the default remains a fresh policy.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--viewer", "--render", action="store_true", help="Watch actual training in a live MuJoCo viewer (environment 0).")
     parser.add_argument("--viewer-speed", type=_finite_float, default=1.0, help="Viewer simulation speed multiplier (default: 1, real time).")
@@ -220,15 +260,21 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--eval-frequency", type=int, default=100_000)
     parser.add_argument("--eval-episodes", type=int, default=20)
     parser.add_argument("--heldout-episodes", type=int, default=100)
-    parser.add_argument("--log-std-init", type=_finite_float, default=-2.0, help="Finite initial Gaussian policy log standard deviation (default: -2).")
+    parser.add_argument("--log-std-init", type=_finite_float, default=argparse.SUPPRESS, help="Finite initial Gaussian policy log standard deviation (fresh default: -2; resume: inherited).")
     parser.add_argument("--reward-scale", type=_finite_float, default=0.01, help="Positive training-only reward multiplier; Monitor and evaluations use raw rewards (default: 0.01).")
-    parser.add_argument("--learning-rate", type=_finite_float, default=0.0003)
-    parser.add_argument("--n-epochs", type=int, default=10, help="PPO optimization epochs; startup trials always use one.")
-    parser.add_argument("--target-kl", type=_finite_float, help="Optional positive PPO KL stopping threshold (disabled by default).")
-    parser.add_argument("--use-sde", action="store_true", help="Use state-dependent exploration for a separate controlled experiment.")
-    parser.add_argument("--sde-sample-freq", type=int, default=-1, help="Resample gSDE noise every N control steps, or -1 once per rollout.")
+    parser.add_argument("--learning-rate", type=_finite_float, default=argparse.SUPPRESS, help="Fresh default: 0.0003; resume inherits the checkpoint value.")
+    parser.add_argument("--n-epochs", type=int, default=argparse.SUPPRESS, help="PPO optimization epochs (fresh default: 10; resume: inherited); trials always use one.")
+    parser.add_argument("--target-kl", type=_finite_float, default=argparse.SUPPRESS, help="Optional positive PPO KL stopping threshold (fresh default: disabled; resume: inherited).")
+    parser.add_argument("--use-sde", action="store_true", default=argparse.SUPPRESS, help="Use state-dependent exploration (fresh default: off; resume: inherited).")
+    parser.add_argument("--sde-sample-freq", type=int, default=argparse.SUPPRESS, help="Resample gSDE noise every N control steps, or -1 once per rollout (resume: inherited).")
     parser.add_argument("--vec-env", choices=("dummy", "subproc"), default="dummy", help="Environment backend; subproc is opt-in for headless full training.")
     args = parser.parse_args(argv)
+    provided_learning = {key for key in LEARNING_DEFAULTS if hasattr(args, key)}
+    for key, default in LEARNING_DEFAULTS.items():
+        if not hasattr(args, key):
+            setattr(args, key, default)
+    args.resume_checkpoint = None
+    args.resume_signature = None
     trial = args.trial
     args.full_training = not trial
     if trial and args.timesteps is None:
@@ -237,14 +283,14 @@ def main(argv: list[str] | None = None) -> None:
     args.envs = args.envs if args.envs is not None else (1 if trial else 8)
     if args.viewer_speed <= 0:
         parser.error("viewer-speed must be positive")
+    if trial and args.resume is not None:
+        parser.error("--resume is unavailable with --trial; startup trials always begin with a fresh policy")
     if args.reward_scale <= 0 or args.learning_rate <= 0 or args.n_epochs < 1:
         parser.error("reward-scale, learning-rate and n-epochs must be positive")
     if args.target_kl is not None and args.target_kl <= 0:
         parser.error("target-kl must be positive")
     if args.sde_sample_freq != -1 and args.sde_sample_freq < 1:
         parser.error("sde-sample-freq must be -1 or a positive number of control steps")
-    if not args.use_sde and args.sde_sample_freq != -1:
-        parser.error("sde-sample-freq requires --use-sde")
     if args.vec_env == "subproc" and (trial or args.viewer):
         parser.error("subproc supports headless full training only; use dummy for --trial or --viewer")
     if trial and args.target_kl is not None:
@@ -261,23 +307,42 @@ def main(argv: list[str] | None = None) -> None:
         args.envs = 1
         print("Using one environment to respect the exact --timesteps limit.", flush=True)
     try:
+        if args.resume is not None:
+            # Resolve 'latest' before creating the new run replaces its pointer.
+            checkpoint_path = current_checkpoint() if args.resume == "latest" else Path(args.resume)
+            probe = SO101ReachEnv()
+            try:
+                args.resume_signature = environment_signature(probe)
+                args.resume_checkpoint = inspect_resume_checkpoint(checkpoint_path, args.resume_signature)
+            finally:
+                probe.close()
+            _inherit_resume_settings(args, args.resume_checkpoint, provided_learning)
+        if not args.use_sde and args.sde_sample_freq != -1:
+            parser.error("sde-sample-freq requires --use-sde")
         with training_output(
             args.output, mode="startup_trial" if trial else "full_training", seed=args.seed,
         ) as output:
             _run(args, output)
-    except OutputError as exc:
+    except (OutputError, ResumeError) as exc:
         parser.error(str(exc))
 
 
 def _run(args, output: Path) -> None:
     trial = not args.full_training
+    resume = args.resume_checkpoint
+    starting = resume.counters if resume is not None else {
+        "timesteps": 0, "optimizer_steps": 0, "update_count": 0, "optimization_epochs": 0,
+    }
     torch.set_num_threads(1)
     torch.use_deterministic_algorithms(True)
     config = {
         "algorithm": "PPO",
         "mode": "startup_trial" if trial else "full_training",
         "requested_timesteps": args.timesteps,
+        "requested_timesteps_unit": "new training transitions in this session",
         "environment_step_limit": args.timesteps,
+        "cumulative_environment_step_limit": (starting["timesteps"] + args.timesteps
+                                               if args.timesteps is not None else None),
         "continuous": not trial and args.timesteps is None,
         "stop_criterion": "first_optimizer_step" if trial else (
             "manual_interrupt" if args.timesteps is None else "total_environment_steps"
@@ -316,20 +381,28 @@ def _run(args, output: Path) -> None:
         "heldout_episodes": 0 if trial else args.heldout_episodes,
         "heldout_seed_start": None if trial else 20_000,
         "checkpoint_loaded": False,
+        "parent_checkpoint": str(resume.path) if resume is not None else None,
+        "parent_checkpoint_sha256": resume.metadata["checkpoint_sha256"] if resume is not None else None,
+        "parent_run_id": resume.path.parent.name if resume is not None else None,
+        **{f"starting_{key}": value for key, value in starting.items()},
         "live_viewer": args.viewer,
         "viewer_speed": args.viewer_speed if args.viewer else None,
         "started_utc": datetime.now(timezone.utc).isoformat(),
     }
-    probe = SO101ReachEnv()
-    try:
-        signature = environment_signature(probe)
-    finally:
-        probe.close()
+    if resume is not None:
+        signature = args.resume_signature
+    else:
+        probe = SO101ReachEnv()
+        try:
+            signature = environment_signature(probe)
+        finally:
+            probe.close()
     write_json(
         output / "training.json",
         {"status": "trial_running" if trial else "running", "mode": config["mode"],
          "config": config, "environment": signature, "actual_timesteps": 0,
-         "update_count": 0, "optimizer_steps": 0, "gradient_update_count": 0},
+         "update_count": 0, "optimizer_steps": 0, "gradient_update_count": 0,
+         **{f"cumulative_{key}": value for key, value in starting.items()}},
     )
 
     def make_env(index: int):
@@ -353,15 +426,24 @@ def _run(args, output: Path) -> None:
     heldout_seconds = 0.0
 
     def progress() -> dict[str, Any]:
-        epochs = int(model._n_updates) if model is not None else 0
+        epochs = int(model._n_updates) if model is not None else starting["optimization_epochs"]
+        timesteps = int(model.num_timesteps) if model is not None else starting["timesteps"]
+        updates = int(model.rollout_update_count) if model is not None else starting["update_count"]
+        optimizer_steps = optimizer_counter.count if optimizer_counter is not None else 0
         return {
-            "actual_timesteps": int(model.num_timesteps) if model is not None else 0,
-            "update_count": int(model.rollout_update_count) if model is not None else 0,
+            "actual_timesteps": timesteps - starting["timesteps"],
+            "cumulative_timesteps": timesteps,
+            "starting_timesteps": starting["timesteps"],
+            "session_environment_step_limit": args.timesteps,
+            "update_count": updates - starting["update_count"],
+            "cumulative_update_count": updates,
             "update_count_unit": "completed PPO rollout updates",
-            "optimization_epochs": epochs,
+            "optimization_epochs": epochs - starting["optimization_epochs"],
+            "cumulative_optimization_epochs": epochs,
             "optimization_epochs_unit": "SB3 epochs entered, including a KL-stopped partial epoch",
-            "optimizer_steps": optimizer_counter.count if optimizer_counter is not None else 0,
-            "gradient_update_count": optimizer_counter.count if optimizer_counter is not None else 0,
+            "optimizer_steps": optimizer_steps,
+            "cumulative_optimizer_steps": starting["optimizer_steps"] + optimizer_steps,
+            "gradient_update_count": optimizer_steps,
             "gradient_update_count_unit": "completed optimizer.step calls",
             "phase_seconds": {
                 "rollout_including_callbacks": float(model.rollout_seconds) if model is not None else 0.0,
@@ -388,6 +470,7 @@ def _run(args, output: Path) -> None:
                 eval_episodes=args.eval_episodes,
                 start_time=start_time,
                 progress=progress,
+                starting_timesteps=starting["timesteps"],
             )
             evaluation_callback = callback
         if args.viewer:
@@ -396,39 +479,52 @@ def _run(args, output: Path) -> None:
             view_callback = TrainingViewer(speed=args.viewer_speed, progress=progress)
             callback = CallbackList([view_callback, callback]) if callback is not None else view_callback
         if not trial and args.timesteps is not None:
-            step_limit = _TrainingStepLimit(args.timesteps, config["n_steps"] * args.envs)
+            step_limit = _TrainingStepLimit(
+                args.timesteps, config["n_steps"] * args.envs, starting_timesteps=starting["timesteps"],
+            )
             callbacks = callback.callbacks if isinstance(callback, CallbackList) else [callback]
             callback = CallbackList([step_limit, *callbacks])
-        model = PPO(
-            "MlpPolicy",
-            vector_env,
-            n_steps=config["n_steps"],
-            batch_size=config["batch_size"],
-            n_epochs=config["n_epochs"],
-            learning_rate=config["learning_rate"],
-            gamma=config["gamma"],
-            gae_lambda=config["gae_lambda"],
-            clip_range=config["clip_range"],
-            ent_coef=config["ent_coef"],
-            vf_coef=config["vf_coef"],
-            max_grad_norm=config["max_grad_norm"],
-            target_kl=config["target_kl"],
-            use_sde=config["use_sde"],
-            sde_sample_freq=config["sde_sample_freq"],
-            policy_kwargs={"net_arch": config["policy_net_arch"], "log_std_init": config["log_std_init"]},
-            device="cpu",
-            seed=args.seed,
-            verbose=1,
-        )
+        if resume is not None:
+            model = load_resume_policy(resume, vector_env, seed=args.seed)
+            config["checkpoint_loaded"] = True
+            write_json(output / "training.json", {
+                "status": "running", "mode": config["mode"], "config": config,
+                "environment": signature, **progress(),
+            })
+            print(f"Resumed {resume.path} at {starting['timesteps']:,} cumulative steps; "
+                  "policy weights and optimizer restored. New environment states use the session seed.", flush=True)
+        else:
+            model = PPO(
+                "MlpPolicy",
+                vector_env,
+                n_steps=config["n_steps"],
+                batch_size=config["batch_size"],
+                n_epochs=config["n_epochs"],
+                learning_rate=config["learning_rate"],
+                gamma=config["gamma"],
+                gae_lambda=config["gae_lambda"],
+                clip_range=config["clip_range"],
+                ent_coef=config["ent_coef"],
+                vf_coef=config["vf_coef"],
+                max_grad_norm=config["max_grad_norm"],
+                target_kl=config["target_kl"],
+                use_sde=config["use_sde"],
+                sde_sample_freq=config["sde_sample_freq"],
+                policy_kwargs={"net_arch": config["policy_net_arch"], "log_std_init": config["log_std_init"]},
+                device="cpu",
+                seed=args.seed,
+                verbose=1,
+            )
         model.set_logger(configure(str(output), ["stdout", "csv"]))
         if not trial:
-            target = "continuously" if args.timesteps is None else f"for {args.timesteps:,} environment steps"
+            target = "continuously" if args.timesteps is None else f"for {args.timesteps:,} new environment steps"
             print(f"Training {target}. Press Ctrl+C or close the viewer to stop and save final_model.zip.", flush=True)
         with _OptimizerStepCounter(model.policy.optimizer, limit=1 if trial else None) as optimizer_counter:
             model.learn(
                 total_timesteps=math.inf if args.timesteps is None else args.timesteps,
                 callback=callback,
                 log_interval=1 if trial else 5,
+                **({"reset_num_timesteps": False} if resume is not None else {}),
             )
         if trial:
             if optimizer_counter.count != 1:

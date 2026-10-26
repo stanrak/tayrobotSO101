@@ -10,7 +10,8 @@ The project develops a simulated robot task in stages so that control, physics, 
 | Physical workspace and reachable ball | Implemented | A table-mounted robot interacts with a free ball under gravity and contact dynamics. |
 | Reach-and-hold learning task | Implemented | A three-joint policy approaches the moving ball and must maintain the required accuracy and stability. |
 | Reproducible training and evaluation | Implemented | Separate run records preserve configuration, source snapshots, checkpoints, metrics, and measured evaluation results. |
-| Critic diagnostics and controlled tuning | Implemented; learning benefit unmeasured | Training-only reward scaling, phase timings, KL/gSDE options, and an optional subprocess backend support controlled experiments. |
+| Critic diagnostics and controlled tuning | Implemented; approach improvement observed in one fresh run | Training-only reward scaling, phase timings, KL/gSDE options, and an optional subprocess backend support controlled experiments. |
+| Explicit checkpoint continuation | Implemented; continued-learning performance unmeasured | A new session can restore a compatible policy and optimizer while preserving parent records and separate session/cumulative counts. |
 | More reliable and efficient learning | Experimental | Compare configurations on matching tasks, budgets, and seeds before selecting a new baseline. |
 
 ## Manual control establishes the workspace
@@ -45,11 +46,33 @@ These measurements belong to the saved configuration. Generated artifacts are ex
 
 The current trainer applies a reward multiplier of `0.01` only to learning and validates every 100,000 training transitions by default. Episode logs and evaluation retain the original reward units. It also measures critic behavior, action clipping and exploration statistics, actual optimizer calls, and time spent in training phases.
 
-The multiplier is a testable response to the observed critic behavior. Improved success rate or throughput has not yet been demonstrated for this configuration. Learning rate and epoch defaults remain unchanged so that the first comparison can isolate the reward-scale change.
+The multiplier is a testable response to the observed critic behavior. Learning rate and epoch defaults remain unchanged so that the first comparison can isolate the reward-scale change.
+
+## A fresh 300,000-transition run improves approach
+
+The later local run `20261026T151230370817Z_full_training_seed42_cbf93550` completed 300,000 transitions with reward scale `0.01`. It started from a new policy (`checkpoint_loaded=false`); it did not inherit the earlier run's weights or optimizer.
+
+| Training transitions | Validation success | Mean final validation distance |
+| ---: | ---: | ---: |
+| 100,000 | 0/20 | 110.70 mm |
+| 200,000 | 0/20 | 43.88 mm |
+| 300,000 | 0/20 | 40.31 mm |
+
+At 200,000 transitions, the previous configuration's distance was 148.66 mm using the same environment signature, training seed, and validation seed set. The latest run's last logged critic explained variance was about 0.995, compared with approximately zero in the previous run. These measurements support improved approach and critic fitting in one training seed.
+
+The final held-out report still recorded 0/100 successes and 38.26 mm mean final distance. None of those episodes reached within 15 mm or recorded a valid hold step. Learning within a run had improved, but the precision/holding task remained unsolved. These historical results do not measure the newly added continuation feature.
+
+## Explicit continuation preserves learned state
+
+The trainer now supports `--resume CHECKPOINT` and `--resume latest`. This restores the selected full-training policy and optimizer in a new run. Omitting the option still starts a fresh policy, and startup diagnostics remain fresh.
+
+Continuation checks compatibility and records parent identity, starting counts, new-session work, and cumulative totals. Environments start new seeded trajectories rather than restoring a mid-episode simulator state. A 300,000-transition checkpoint followed by a requested 200,000-transition session can therefore record 500,000 cumulative transitions without overwriting the parent experiment. See [Training](training.md) and [Experiment records](experiments.md).
+
+The implementation and unit tests establish state-restoration behavior. Any improvement in success rate, stability, or time to a learning target still requires a measured continued-training experiment.
 
 ## Next experiments
 
-1. Use a finite pilot to compare critic value spread, saturation, and the distance curve with the saved baseline.
+1. Continue a compatible checkpoint with a finite additional budget and evaluate precision and hold progress alongside critic diagnostics.
 2. Measure rollout, optimizer, diagnostic, and validation costs before choosing a different execution backend.
 3. Test lower learning rate, KL stopping, and gSDE in separate experiments with matching budgets and seeds.
 4. Confirm promising settings with additional training seeds and a held-out evaluation after configuration selection.

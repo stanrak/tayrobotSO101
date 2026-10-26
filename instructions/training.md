@@ -12,6 +12,18 @@ Read the [instruction index](instruction.md), [workflow](workflow.md), and [phys
 - Never perform the learning task for the policy. Do not add an IK solver, scripted reach controller, teacher actions, or automatic task completion. Initial pose setup and reachable-target sampling must not generate robot actions.
 - Keep historical artifacts unchanged; do not automatically load them when opening the simulation or starting a fresh trial.
 
+## Explicit checkpoint continuation
+
+- `--resume CHECKPOINT` or `--resume latest` is an explicit full-training choice. Keep omitted `--resume` as a fresh start, and reject `--trial` combined with resume before output creation.
+- Resolve `latest` against the existing pointer before creating a new output or replacing that pointer. Preserve the selected checkpoint and all parent-run bytes.
+- Validate checkpoint content hash, schema/algorithm, exact environment/assets/package signatures, full-training state, optimizer availability, and measured continuation counters. Do not infer absent cumulative optimizer/update counts or silently migrate unsupported historical checkpoints.
+- Restore with `DiagnosticPPO.load` so diagnostic/counter methods remain active. Keep the Adam optimizer state and cumulative network counters; do not replace them with a freshly initialized policy or optimizer while claiming continuation.
+- Inherit saved learning hyperparameters. Reject explicitly supplied mismatches for learning rate, epochs, KL, exploration settings, and initial log standard deviation. Reward scale must match the chosen checkpoint; the default remains `0.01`, so a raw-scale checkpoint needs explicit matching scale `1`. Do not silently rescale critic targets or reset optimizer state.
+- New-session seed, environment count/backend, viewer, evaluation settings, and step budget may be selected separately. Reset environment trajectories and session timing; do not claim exact continuation of the parent's ball pose, unfinished episode, RNG stream, or partial rollout.
+- Treat `--timesteps` as an additional/session budget. Base exact stopping and periodic validation on observed transitions since the selected checkpoint, not the absolute cumulative count. Retain the complete-rollout update rule and discard a final incomplete rollout.
+- Keep `actual_timesteps`, `optimizer_steps`, `update_count`, and `optimization_epochs` as session observations. Record `starting_*` baselines and matching `cumulative_*` counts, plus parent checkpoint path/hash/run identity. Report interrupted or failed sessions using only observed work.
+- Implementing or testing resume does not authorize launching a real resumed training run. Keep tests on fake collectors/counters or checkpoint state round-trips without actual learning.
+
 ## First-update trial contract
 
 1. Choose and explain the initial transition budget before a real trial. Use the smallest reasonable amount of data needed for the algorithm's first update, accounting for rollout length, environment count, and any warmup.

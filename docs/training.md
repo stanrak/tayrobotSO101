@@ -9,14 +9,35 @@ The trainer uses PPO with a small multilayer perceptron on the CPU. Manual keybo
 | Mode | Command | Result |
 | --- | --- | --- |
 | Continuous training | `.\.venv\Scripts\python -m so101_sim.train` | A fresh policy trains until Ctrl+C or a viewer interruption. |
-| Bounded training | `.\.venv\Scripts\python -m so101_sim.train --timesteps 307200 --seed 42` | Training stops at the requested total transition count, then performs final validation and held-out evaluation. |
+| Bounded training | `.\.venv\Scripts\python -m so101_sim.train --timesteps 307200 --seed 42` | A fresh policy trains for the requested session transition count, then performs final validation and held-out evaluation. |
+| Continued training | `.\.venv\Scripts\python -m so101_sim.train --resume latest --timesteps 200000 --seed 42` | A checked checkpoint restores policy and optimizer state for an additional 200,000 transitions in a new run. |
 | Startup diagnostic | `.\.venv\Scripts\python -m so101_sim.train --trial --timesteps 500 --seed 42` | A fresh policy collects one batch and completes exactly one optimizer step, without performance evaluation. |
 
-`--full-training` remains an alias for the default training mode. Without `--trial` or a step limit, training is continuous. Every invocation starts a new policy in a separate output directory; it does not resume a historical checkpoint.
+`--full-training` remains an alias for the default training mode. Without `--trial` or a step limit, training is continuous. Each invocation creates a separate output directory. Omitting `--resume` starts a fresh policy; resuming is an explicit choice.
 
 A transition is one control step in one environment. Full training defaults to eight environments and 256 steps per environment per rollout, giving 2,048 transitions per rollout. The bounded example above contains 150 complete rollouts. If the requested limit is not divisible by eight, the default changes to one environment; an explicit `--envs` value must divide the limit. PPO updates only complete rollouts, so a final incomplete rollout is discarded. Validation and held-out episodes add simulation work outside the training transition limit.
 
 The trial defaults to 500 transitions when `--timesteps` is omitted. It supports a task-specific budget of at least two transitions, including budgets above 500, but always uses one environment, the whole rollout as one batch, and one optimization epoch. An optimizer-call guard prevents a second update. An episode or rollout ending is not itself a network update. The trial checks initialization and the first update; it does not establish that the robot has learned the task.
+
+## Continue a saved policy
+
+To continue from the latest available full-training checkpoint:
+
+```powershell
+.\.venv\Scripts\python.exe -m so101_sim.train --resume latest --timesteps 200000 --seed 42
+```
+
+`--timesteps` is the number of **additional transitions in this session**. Starting from a checkpoint at 300,000 transitions and requesting 200,000 records 200,000 session transitions and 500,000 cumulative transitions. The exact cap is measured from the checkpoint's starting count, including when the final rollout is incomplete. Validation cadence is also measured in the new session's transitions.
+
+`latest` resolves the existing latest-run pointer before the new output directory becomes the latest run. It uses the checkpoint selection described in [Experiment records](experiments.md), which prefers a best-validation checkpoint. To continue from a particular final or best policy, pass its path to `--resume` instead. Only supported full-training checkpoints can be resumed; `--trial --resume ...` is rejected before output creation.
+
+Continuation restores policy weights, the Adam optimizer state, and cumulative training counters through `DiagnosticPPO`. The new session initializes environments and random generators using the selected seed. It does not restore the previous ball pose, unfinished episode, or partially collected rollout, so it is not an exact replay of an uninterrupted process.
+
+The checkpoint's learning settings are inherited. An explicitly supplied learning rate, epoch count, KL threshold, exploration setting, or initial log standard deviation must match the saved setting. Environment count, backend, viewer, seed, evaluation settings, and additional step budget can be chosen for the new session. A different environment count or seed can change subsequent learning trajectories.
+
+The requested reward scale must also match the checkpoint. The default remains `0.01`; a checkpoint trained with raw reward scale `1` requires an explicit matching `--reward-scale 1`. The trainer rejects a mismatch rather than silently changing the critic's target units or reinitializing its optimizer. Incompatible task signatures, assets, packages, checkpoint hashes, missing optimizer state, or missing continuation counters also cause a clear failure. Historical checkpoints are not migrated automatically.
+
+The parent checkpoint remains unchanged. The new run records its parent path, SHA256, run identifier, and starting counters. [Experiment records](experiments.md) explains the session and cumulative fields. These commands describe how to launch continuation; no continued-learning performance is established by the feature itself.
 
 ## Observe the actual training run
 
@@ -32,9 +53,10 @@ Ctrl+C or closing the viewer interrupts full training, saves `final_model.zip`, 
 
 ## Training settings
 
-| Option | Default | Meaning |
+| Option | Fresh-run default | Meaning |
 | --- | --- | --- |
-| `--timesteps` | Unlimited | Total training transitions; in trial mode, the initial rollout budget. |
+| `--timesteps` | Unlimited | Session training transitions; additional transitions when resuming, or the initial rollout budget in trial mode. |
+| `--resume` | Unset | Explicit full-training checkpoint path or `latest`; restores policy and optimizer into a new run. |
 | `--seed` | `42` | Training seed. |
 | `--envs` | `8`, or `1` for trial | Number of environment copies. |
 | `--reward-scale` | `0.01` | Positive finite reward multiplier applied only to training. |
@@ -57,7 +79,7 @@ Additional PPO settings are recorded in each run's `training.json`: batch size 2
 
 `RewardScale` multiplies the environment reward by 0.01 before PPO receives it. `Monitor` sits inside this wrapper, so episode logs, validation, and held-out reports retain the original reward units. The physical task, success threshold, action controller, and environment reward formula are unchanged by the multiplier.
 
-The scale was introduced as a controlled response to a nearly constant critic observed in an earlier saved run. Improved task performance still needs to be measured. A short pilot can reveal better distance reduction or critic learning before any successful episode; it is not a learned-performance benchmark.
+The scale was introduced as a controlled response to a nearly constant critic observed in an earlier saved run. A later fresh 300,000-transition run improved approach distance and critic fitting, but still recorded zero held-out successes; see [Project stages](project-stages.md). A short pilot can reveal better distance reduction or critic learning before any successful episode; it is not a learned-performance benchmark.
 
 Change one setting at a time. For example, compare a new run with `--learning-rate 0.0001`, then a separate run with `--target-kl 0.01`. Match task/environment signatures, budgets, seeds, and evaluation settings. Use `--reward-scale 1 --eval-frequency 25000` to reproduce the previous reward scale and validation cadence. Fresh runs do not automatically load earlier policies.
 
@@ -89,9 +111,11 @@ These are alternative flag sets, not standalone commands. Process communication 
 
 PPO training samples actions, while validation uses deterministic predictions. Their success rates can differ because of both exploration noise and different state/seed distributions. Evaluate approach distance, velocity/holding behavior, timeout/collision causes, and repeated checkpoint results together.
 
-`update_count` records completed PPO optimization phases containing at least one successful optimizer step. `optimizer_steps` records actual successful calls. `optimization_epochs` counts SB3 epochs entered and may include a partial epoch stopped by KL. These counters remain distinct when early stopping or an interruption occurs.
+`update_count` records completed PPO optimization phases containing at least one successful optimizer step. `optimizer_steps` records actual successful calls. `optimization_epochs` counts SB3 epochs entered and may include a partial epoch stopped by KL. These top-level counts describe the current session. Matching `cumulative_*` fields include the parent checkpoint's counts, and `starting_*` fields record that baseline. These counters remain distinct when early stopping or an interruption occurs.
 
-`training.json` records cumulative `phase_seconds`:
+In `progress.csv`, `time/total_timesteps`, `train/n_updates`, `train/rollout_update_count`, and `train/actual_optimizer_steps` retain the model's cumulative counters. Additional `time/session_timesteps` and `time/cumulative_timesteps` columns distinguish the two transition counts. In `evaluations.csv` and `best_validation.json`, `timesteps` describes the current session and `cumulative_timesteps` includes the selected parent.
+
+`training.json` records `phase_seconds` accumulated within the current session; parent timing totals are not carried into the new session:
 
 | Key | Scope |
 | --- | --- |

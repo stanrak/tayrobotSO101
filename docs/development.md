@@ -14,6 +14,7 @@ The project separates manual interaction, the physical learning environment, tra
 | [`so101_sim/env.py`](../so101_sim/env.py) | Physical workspace, reachable ball sampling, observations/actions/reward, success, and reset cadence. |
 | [`so101_sim/train.py`](../so101_sim/train.py) | Continuous/bounded PPO training, single-update trials, fixed-seed validation, checkpoints, and CLI settings. |
 | [`so101_sim/learning.py`](../so101_sim/learning.py) | Training-only reward scaling and PPO diagnostics from already collected data. |
+| [`so101_sim/resume.py`](../so101_sim/resume.py) | Continuation compatibility checks and restoration of diagnostic PPO state and optimizer. |
 | [`so101_sim/training_view.py`](../so101_sim/training_view.py) | Observation of actual training state through independent viewer model/data copies. |
 | [`so101_sim/vector_env.py`](../so101_sim/vector_env.py) | Optional subprocess environment startup and bounded worker cleanup. |
 | [`so101_sim/evaluate.py`](../so101_sim/evaluate.py) | Checked checkpoint loading, seeded comparisons, metrics, and policy playback. |
@@ -41,11 +42,12 @@ The local test suite covers:
 - Keyboard mappings, real MuJoCo movement, pause/resume/reset, and independent viewer state.
 - Fixed geometry/physics, gravity/contact/friction, moving-ball observations, reachable placements, and target persistence.
 - Success holding requirements, collision failure, exact target/attempt limits, and truncation behavior.
-- Exact training transition caps, first-update stopping, actual optimizer counters, KL stopping, and interruption records.
+- Exact session transition caps, first-update stopping, actual optimizer counters, KL stopping, and interruption records.
+- Explicit checkpoint continuation, restored optimizer state, parent lineage, and separate session/cumulative counts.
 - Raw versus scaled rewards, sampled critic diagnostics, checkpoint compatibility, and subprocess ownership/cleanup.
 - Unique output records, locking, latest-run lookup, provenance allowlists, and comparison labels.
 
-Training-budget tests use fake environments and optimizer counters rather than real learning runs. Critic tests can use synthetic tensors, and worker-lifecycle tests use fake pipes/processes. Physical environment tests do step MuJoCo. Passing these tests verifies specified behavior, not the task success rate of a trained policy or the speed of real multiprocessing.
+Training-budget tests use fake environments and optimizer counters rather than real learning runs. Checkpoint-continuation tests can save and restore synthetic model/optimizer state without taking environment steps or optimizing a network. Critic tests can use synthetic tensors, and worker-lifecycle tests use fake pipes/processes. Physical environment tests do step MuJoCo. Passing these tests verifies specified behavior, not the task success rate of a trained policy or the speed of real multiprocessing.
 
 CLI help can be inspected without starting simulation or training:
 

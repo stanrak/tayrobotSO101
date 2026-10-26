@@ -221,6 +221,92 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(record["update_count"], 3)
         self.assertEqual(record["optimization_epochs"], 7)
 
+    def test_resume_catalog_separates_session_totals_and_checkpoint_lineage(self):
+        legacy = self.root / "history/legacy"
+        fresh = self.root / "experiments/fresh"
+        resumed = self.root / "experiments/resumed"
+        self.training(legacy)
+        original = self.training(fresh)
+        original["config"].update({
+            "checkpoint_loaded": False, "starting_timesteps": 0,
+            "starting_optimizer_steps": 0, "starting_update_count": 0,
+            "starting_optimization_epochs": 0,
+        })
+        original.update({
+            "cumulative_timesteps": 600, "cumulative_optimizer_steps": 2,
+            "cumulative_update_count": 1, "cumulative_optimization_epochs": 3,
+        })
+        self.write_json(fresh / "training.json", original)
+        continuation = self.training(resumed)
+        lineage = {
+            "checkpoint_loaded": True,
+            "parent_checkpoint": str((fresh / "best_model.zip").resolve()),
+            "parent_checkpoint_sha256": "parent-checkpoint-digest", "parent_run_id": "fresh",
+            "starting_timesteps": 600, "starting_optimizer_steps": 2,
+            "starting_update_count": 1, "starting_optimization_epochs": 3,
+        }
+        totals = {
+            "cumulative_timesteps": 1200, "cumulative_optimizer_steps": 4,
+            "cumulative_update_count": 2, "cumulative_optimization_epochs": 6,
+        }
+        continuation["config"].update(lineage)
+        continuation.update({"update_count": 1, "optimization_epochs": 3, **totals})
+        self.write_json(resumed / "training.json", continuation)
+        before = {path: path.read_bytes() for path in self.root.rglob("*.json")}
+        rows = {row["path"]: row for row in experiments.refresh_catalog(self.root)}
+        row = rows["experiments/resumed"]
+        self.assertEqual(row["requested_timesteps"], 600)
+        self.assertEqual(row["actual_timesteps"], 600)
+        self.assertEqual(row["optimizer_steps"], 2)
+        self.assertEqual(row["update_count"], 1)
+        self.assertEqual(row["optimization_epochs"], 3)
+        for key, value in {**lineage, **totals}.items():
+            self.assertEqual(row[key], value)
+        self.assertFalse(rows["experiments/fresh"]["checkpoint_loaded"])
+        self.assertEqual(rows["experiments/fresh"]["starting_timesteps"], 0)
+        self.assertEqual(rows["experiments/fresh"]["parent_checkpoint"], "")
+        self.assertEqual(rows["experiments/fresh"]["cumulative_timesteps"], 600)
+        for key in (*experiments.LINEAGE_FIELDS, *experiments.CUMULATIVE_FIELDS):
+            self.assertEqual(rows["history/legacy"][key], "")
+        with (self.root / "index.csv").open(newline="", encoding="utf-8") as handle:
+            indexed = {row["path"]: row for row in csv.DictReader(handle)}
+        self.assertEqual(indexed["experiments/resumed"]["actual_timesteps"], "600")
+        self.assertEqual(indexed["experiments/resumed"]["cumulative_timesteps"], "1200")
+        self.assertEqual(indexed["experiments/fresh"]["checkpoint_loaded"], "False")
+        self.assertEqual(indexed["history/legacy"]["cumulative_timesteps"], "")
+        self.assertTrue(all(path.read_bytes() == content for path, content in before.items()))
+
+    def test_finalization_retains_resume_lineage_and_cumulative_counts(self):
+        directory = self.root / "experiments/resumed"
+        self.write_json(directory / "run.json", {"run_id": "resumed", "status": "running"})
+        training = self.training(directory, status="interrupted")
+        lineage = {
+            "checkpoint_loaded": True, "parent_checkpoint": "parent/best_model.zip",
+            "parent_checkpoint_sha256": "parent-digest", "parent_run_id": "parent",
+            "starting_timesteps": 300000, "starting_optimizer_steps": 11680,
+            "starting_update_count": 146, "starting_optimization_epochs": 1460,
+        }
+        totals = {
+            "cumulative_timesteps": 300600, "cumulative_optimizer_steps": 11682,
+            "cumulative_update_count": 147, "cumulative_optimization_epochs": 1463,
+        }
+        training["config"].update(lineage)
+        training.update(totals)
+        self.write_json(directory / "training.json", training)
+        before = (directory / "training.json").read_bytes()
+        record = experiments.finish_run_record(directory, status="interrupted")
+        self.assertEqual(record["actual_timesteps"], 600)
+        self.assertEqual(record["optimizer_steps"], 2)
+        for key, value in {**lineage, **totals}.items():
+            self.assertEqual(record[key], value)
+        self.assertEqual((directory / "training.json").read_bytes(), before)
+        # Finalized provenance still exposes measured continuity if the training
+        # metadata is unavailable; no parent checkpoint is opened or inferred.
+        self.write_json(directory / "training.json", {})
+        row = experiments.catalog_rows(self.root)[0]
+        for key, value in {**lineage, **totals}.items():
+            self.assertEqual(row[key], value)
+
     def test_malformed_optional_phase_times_leave_metrics_unmeasured(self):
         directory = self.root / "experiments/malformed-phases"
         training = self.training(directory)

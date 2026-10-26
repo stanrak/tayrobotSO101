@@ -19,11 +19,21 @@ from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = ("numpy", "mujoco", "gymnasium", "stable-baselines3", "torch")
+LINEAGE_FIELDS = (
+    "checkpoint_loaded", "parent_checkpoint", "parent_checkpoint_sha256", "parent_run_id",
+    "starting_timesteps", "starting_optimizer_steps", "starting_update_count",
+    "starting_optimization_epochs",
+)
+CUMULATIVE_FIELDS = (
+    "cumulative_timesteps", "cumulative_optimizer_steps", "cumulative_update_count",
+    "cumulative_optimization_epochs",
+)
 FIELDS = (
     "run_id", "path", "created_utc", "status", "mode", "seed", "task",
     "environment_sha256", "source_sha256", "git_commit", "git_dirty",
     "requested_timesteps", "actual_timesteps", "optimizer_steps", "update_count",
-    "optimization_epochs", "num_envs", "vec_env_backend", "reward_scale",
+    "optimization_epochs", *CUMULATIVE_FIELDS, *LINEAGE_FIELDS,
+    "num_envs", "vec_env_backend", "reward_scale",
     "training_seconds", "learning_rate", "batch_size", "n_steps", "n_epochs",
     "gamma", "log_std_init", "target_kl", "use_sde", "sde_sample_freq",
     "rollout_seconds_including_callbacks", "optimization_seconds", "diagnostics_seconds", "validation_seconds",
@@ -158,9 +168,14 @@ def finish_run_record(output: Path, *, status: str, error: str | None = None) ->
     record["status"] = training.get("status") if not exceptional and training.get("status") in terminal else status
     record["finished_utc"] = (_now() if exceptional else training.get("finished_utc")) or _now()
     for key in ("actual_timesteps", "optimizer_steps", "update_count", "optimization_epochs",
-                "training_seconds", "elapsed_seconds", "phase_seconds"):
+                *CUMULATIVE_FIELDS, "training_seconds", "elapsed_seconds", "phase_seconds"):
         if key in training:
             record[key] = training[key]
+    config = training.get("config", {})
+    if isinstance(config, dict):
+        for key in LINEAGE_FIELDS:
+            if key in config:
+                record[key] = config[key]
     if error is not None:
         record["error"] = str(error)
     elif "error" in training:
@@ -242,6 +257,8 @@ def _run_row(directory: Path, root: Path) -> dict[str, Any]:
         "optimizer_steps": training.get("optimizer_steps", record.get("optimizer_steps", "")),
         "update_count": training.get("update_count", record.get("update_count", "")),
         "optimization_epochs": training.get("optimization_epochs", record.get("optimization_epochs", "")),
+        **{key: training.get(key, record.get(key, "")) for key in CUMULATIVE_FIELDS},
+        **{key: config.get(key, record.get(key, "")) for key in LINEAGE_FIELDS},
         "num_envs": config.get("num_envs", ""),
         "training_seconds": training.get("training_seconds", training.get("elapsed_seconds", "")),
         **{key: config.get(key, "") for key in (
