@@ -128,7 +128,7 @@ class EvaluationProgressTests(unittest.TestCase):
             self.assertTrue(actual_prediction[1])
 
     def test_checkpoint_reports_heartbeat_and_all_policy_totals(self):
-        clock = SimpleNamespace(now=0.0, seconds_per_step=0.01)
+        clock = SimpleNamespace(now=0.0, seconds_per_step=0.05)
         environment = ProgressEnvironment(1200, clock=clock)
         model = ProgressModel()
         metadata = {"checkpoint_sha256": "fake-sha256", "environment": {"fake": True}}
@@ -143,14 +143,18 @@ class EvaluationProgressTests(unittest.TestCase):
         ):
             report = evaluate_checkpoint(Path("fake.zip"), episodes=2, seed=91)
         lines = output.getvalue().splitlines()
+        self.assertIn("Progress is reported every 30 seconds", output.getvalue())
         heartbeat_steps = []
+        heartbeat_elapsed = []
         for line in lines:
             if "Evaluation trained: 0/2 episodes" in line:
                 match = re.search(r"([\d,]+) control steps", line)
                 if match is not None:
                     heartbeat_steps.append(int(match.group(1).replace(",", "")))
+                    heartbeat_elapsed.append(float(re.search(r"elapsed ([\d.]+)s", line).group(1)))
         self.assertIn(0, heartbeat_steps)
         self.assertTrue(any(0 < steps < 1200 for steps in heartbeat_steps))
+        self.assertAlmostEqual(heartbeat_elapsed[1], 30.0, delta=0.1)
         self.assertLess(len(lines), 30)
         for index, policy in enumerate(("trained", "no_motion", "random")):
             completed = [line for line in lines if f"Evaluation {policy}: 2/2 episodes" in line]

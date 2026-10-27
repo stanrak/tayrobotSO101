@@ -274,7 +274,7 @@ class _EvaluationProgress:
             f"elapsed {now - self.started:.1f}s",
             flush=True,
         )
-        self.next_report = now + 10.0
+        self.next_report = now + 30.0
 
 
 def evaluate_checkpoint(
@@ -297,7 +297,7 @@ def evaluate_checkpoint(
         print(
             f"Checkpoint evaluation: {episodes} episodes per policy x {len(policies)} policies "
             f"= {total_episodes} episodes; at most {total_episodes * env.max_steps:,} control steps. "
-            "Progress is reported every 10 seconds and at each policy's completion.",
+            "Progress is reported every 30 seconds and at each policy's completion.",
             flush=True,
         )
         started = time.perf_counter()
