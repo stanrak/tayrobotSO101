@@ -81,7 +81,7 @@ Additional PPO settings are recorded in each run's `training.json`: batch size 2
 
 `RewardScale` multiplies the environment reward by 0.01 before PPO receives it. `Monitor` sits inside this wrapper, so episode logs, validation, and held-out reports retain the original reward units. The physical task, success threshold, action controller, and environment reward formula are unchanged by the multiplier.
 
-Reward scaling is a controlled way to examine critic target magnitude while preserving raw task metrics. Approach behavior and critic fitting can improve before precise reaching and stable holding are reliable. Broad implementation progress is described in [Project stages](project-stages.md); run-specific reviews and measurements remain confidential local records under `report/`.
+Reward scaling is a controlled way to examine critic target magnitude while preserving raw task metrics. Approach behavior and critic fitting can improve before precise reaching and stable holding are reliable. Broad implementation progress is described in [Project stages](project-stages.md); run-specific reviews and measurements remain confidential local records under `reports/`.
 
 Change one setting at a time. For example, compare a new run with `--learning-rate 0.0001`, then a separate run with `--target-kl 0.01`. Match task/environment signatures, budgets, seeds, and evaluation settings. Use `--reward-scale 1` to compare raw-reward training, with a matched validation cadence in both configurations. Fresh runs do not automatically load earlier policies.
 

@@ -2,7 +2,7 @@
 
 [Documentation guide](README.md) | [Project overview](../README.md)
 
-The project develops a simulated robot task in stages so that control, physics, and learning quality can be examined separately. This page describes implementation progress and broad learning observations. Detailed run reviews and measurements remain confidential local records under `report/`.
+The project develops a simulated robot task in stages so that control, physics, and learning quality can be examined separately. This page describes implementation progress and broad learning observations. Detailed run reviews and measurements remain confidential local records under `reports/`.
 
 | Stage | Status | Progress |
 | --- | --- | --- |

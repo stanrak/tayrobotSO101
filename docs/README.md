@@ -26,4 +26,4 @@ These documents explain how to use the SO-101 simulation, how the learning task 
 
 Simulation time, training transitions, optimizer steps, and wall-clock time measure different things. A startup trial checks initialization and one optimizer step; it does not establish task performance. Validation selects a checkpoint, while held-out evaluation estimates performance on separate seeds. The [training](training.md) and [experiment](experiments.md) guides explain these distinctions.
 
-Run data, detailed reviews, and measurements are confidential local artifacts. Detailed reviews belong under `report/`; versioned documentation contains general technical descriptions, process, and broad achievements. A fresh checkout includes the implementation and documentation without local results.
+Run data, detailed reviews, and measurements are confidential local artifacts. Detailed reviews belong under `reports/`; versioned documentation contains general technical descriptions, process, and broad achievements. A fresh checkout includes the implementation and documentation without local results.
