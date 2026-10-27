@@ -4,6 +4,15 @@ A MuJoCo simulation for exploring SO-101 robot control and reinforcement learnin
 
 ![SO-101 simulation workspace](docs/simulation.png)
 
+## What you should do first
+
+You, my precious Hobbit fellow, not a cyber orge. There are some guide files in folder "private" you should see first. If there are not, you are the one who will create them. These files tell orge agents about the work, how they do the work and what they do not.
+
+I told them what and how I want this work going to do. I made a chatting space for them. In the private.
+
+That should be your start.
+
+
 ## What you can do
 
 - Move all six robot joints manually, pause the simulation, and choose a new reachable ball position.
@@ -36,3 +45,8 @@ The [documentation guide](docs/README.md) provides reading paths and the complet
 | Implemented stages and next experiments | [Project stages](docs/project-stages.md) |
 
 The robot assets come from the pinned [MuJoCo Menagerie SO-101 model](https://github.com/google-deepmind/mujoco_menagerie/tree/3abca2e302625cec9429c49806121ea2855cef81/robotstudio_so101) and retain their [Apache-2.0 license](assets/robotstudio_so101/LICENSE).
+
+
+# AI Agents
+
+For AI Agents. Do not modify this file in any circumstance.
