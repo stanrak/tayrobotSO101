@@ -589,6 +589,71 @@ class StartupTrialTests(unittest.TestCase):
             "rollout_including_callbacks", "optimization", "diagnostics", "validation", "heldout",
         })
 
+    def test_full_training_records_and_announces_heldout_phase_before_evaluation(self):
+        with self.fake_full_training() as fake, patch("builtins.print") as log:
+            completed_report = fake.evaluate.return_value
+            checkpoint_bytes = b"saved final checkpoint"
+            fake.checkpoint.side_effect = lambda model, path, *args: path.write_bytes(checkpoint_bytes)
+
+            def inspect_heldout_start(checkpoint, *, episodes, seed):
+                fake.checkpoint.assert_called_once()
+                self.assertEqual((self.output / "final_model.zip").read_bytes(), checkpoint_bytes)
+                self.assertEqual(checkpoint, self.output / "best_model.zip")
+                self.assertEqual((episodes, seed), (7, 20_000))
+                report = json.loads((self.output / "training.json").read_text(encoding="utf-8"))
+                self.assertEqual(report["status"], "evaluating")
+                self.assertEqual(report["config"]["heldout_episodes"], 7)
+                self.assertEqual(report["environment"], {"fake": True})
+                self.assertEqual(report["actual_timesteps"], 256)
+                self.assertEqual(report["optimizer_steps"], 10)
+                self.assertEqual(report["update_count"], 1)
+                self.assertEqual(report["heldout_checkpoint"], "best_model.zip")
+                self.assertFalse(report["task_performance_evaluated"])
+                self.assertGreaterEqual(report["training_seconds"], 0)
+                self.assertEqual(report["phase_seconds"]["heldout"], 0)
+                self.assertNotIn("finished_utc", report)
+                self.assertNotIn("heldout_summaries", report)
+                self.assertFalse((self.output / "evaluation.json").exists())
+                phase_logs = [call for call in log.call_args_list if call.kwargs.get("flush")]
+                self.assertTrue(any("Training finished. Final checkpoint saved" in call.args[0]
+                                    for call in phase_logs))
+                self.assertTrue(any("3 policies x 7 episodes (21 total)" in call.args[0]
+                                    and "Ctrl+C" in call.args[0]
+                                    and "saved checkpoints are retained" in call.args[0]
+                                    for call in phase_logs))
+                return completed_report
+
+            fake.evaluate.side_effect = inspect_heldout_start
+            train.main([
+                "--timesteps", "256", "--envs", "1", "--heldout-episodes", "7",
+                "--output", str(self.output),
+            ])
+        report = json.loads((self.output / "training.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["status"], "completed")
+        self.assertIn("finished_utc", report)
+        self.assertEqual(report["heldout_summaries"], {
+            "trained": completed_report["results"]["trained"]["summary"],
+        })
+
+    def test_interrupted_heldout_keeps_checkpoint_and_observed_training_counters(self):
+        with self.fake_full_training() as fake:
+            checkpoint_bytes = b"saved checkpoint"
+            fake.checkpoint.side_effect = lambda model, path, *args: path.write_bytes(checkpoint_bytes)
+            fake.evaluate.side_effect = KeyboardInterrupt
+            with self.assertRaises(KeyboardInterrupt):
+                train.main(["--timesteps", "256", "--envs", "1", "--output", str(self.output)])
+        report = json.loads((self.output / "training.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["status"], "interrupted")
+        self.assertEqual(report["checkpoint"], "final_model.zip")
+        self.assertEqual((self.output / "final_model.zip").read_bytes(), checkpoint_bytes)
+        self.assertEqual(report["actual_timesteps"], 256)
+        self.assertEqual(report["optimizer_steps"], 10)
+        self.assertEqual(report["update_count"], 1)
+        self.assertFalse(report["task_performance_evaluated"])
+        self.assertNotIn("heldout_summaries", report)
+        self.assertFalse((self.output / "evaluation.json").exists())
+        self.assertTrue(all(env.closed for env in CountingEnvironment.instances))
+
     def test_kl_stopped_epoch_still_counts_an_actual_rollout_update(self):
         with self.fake_full_training(), patch.object(RolloutRoundingPPO, "early_stop_epochs", 1):
             train.main([

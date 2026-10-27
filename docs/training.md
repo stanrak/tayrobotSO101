@@ -51,6 +51,8 @@ The viewer runs at real time by default. Add `--viewer-speed 4` for four times s
 
 Ctrl+C or closing the viewer interrupts full training, saves `final_model.zip`, records the observed counts and interrupted status, and skips final held-out evaluation. Reaching a requested step limit instead completes the normal evaluation path. See [Experiment records](experiments.md) for checkpoint selection and report locations.
 
+After final validation, the trainer saves `final_model.zip` and evaluates the selected checkpoint against the no-motion and random-action baselines sequentially. This phase can take substantial time: the default 100 episodes per policy means 300 episodes and up to 360,000 additional control steps. The `Monitor` and `DummyVecEnv` messages at this point accompany checkpoint loading. Loading and policy-start messages, in-flight progress about every ten seconds, and policy-completion messages identify the current work, completed episodes, control steps, and overall elapsed time. `training.json` records status `evaluating` and measured training counts before this phase; `evaluation.json` appears when the full report is complete.
+
 ## Training settings
 
 | Option | Fresh-run default | Meaning |
@@ -69,7 +71,7 @@ Ctrl+C or closing the viewer interrupts full training, saves `final_model.zip`, 
 | `--vec-env` | `dummy` | Sequential environments, or opt-in `subproc` workers. |
 | `--eval-frequency` | `100000` | Training transitions between periodic validation rounds. |
 | `--eval-episodes` | `20` | Fixed-seed validation episodes per round. |
-| `--heldout-episodes` | `100` | Episodes per policy in the final held-out report. |
+| `--heldout-episodes` | `100` | Episodes per policy in the final held-out report; smaller counts reduce runtime and statistical precision. |
 | `--viewer-speed` | `1.0` | Positive display speed multiplier when using the viewer. |
 | `--output` | New managed directory | Optional custom empty training directory. |
 

@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 import platform
 import time
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import numpy as np
 import mujoco
@@ -152,8 +152,13 @@ def run_episodes(
     model: PPO | None = None,
     policy: str = "trained",
     render: bool = False,
+    progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
-    """Roll out a policy; all baselines receive identical seeded initial conditions."""
+    """Roll out a policy; all baselines receive identical seeded initial conditions.
+
+    Progress receives completed episodes and observed control steps, including
+    steps from the current episode, without collecting additional transitions.
+    """
     if policy not in ("trained", "no_motion", "random"):
         raise ValueError(f"Unknown evaluation policy: {policy}")
     if policy == "trained" and model is None:
@@ -165,7 +170,10 @@ def run_episodes(
     else:
         viewer_context = nullcontext(None)
     rows = []
+    control_steps = 0
     with viewer_context as viewer:
+        if progress is not None:
+            progress(0, 0)
         viewer_state = None
         if viewer is not None:
             viewer_state = np.empty(mujoco.mj_stateSize(env.model, mujoco.mjtState.mjSTATE_INTEGRATION))
@@ -199,6 +207,9 @@ def run_episodes(
                 minimum_distance = min(minimum_distance, float(info["distance"]))
                 maximum_hold = max(maximum_hold, int(info["hold_steps"]))
                 done = bool(terminated or truncated)
+                control_steps += 1
+                if progress is not None:
+                    progress(len(rows), control_steps)
                 if viewer is not None:
                     _sync_playback_view(viewer, env.model, env.data, viewer_state)
                     time.sleep(max(0.0, env.dt - (time.perf_counter() - step_start)))
@@ -219,6 +230,8 @@ def run_episodes(
                     "termination_reason": "success" if info["is_success"] else "collision" if info.get("collision", False) else "time_limit" if truncated else "other_failure",
                 }
             )
+            if progress is not None:
+                progress(len(rows), control_steps)
     if not rows:
         raise ValueError("At least one evaluation episode is required.")
     successes = sum(row["is_success"] for row in rows)
@@ -239,6 +252,31 @@ def run_episodes(
     return {"policy": policy, "summary": summary, "episodes": rows}
 
 
+class _EvaluationProgress:
+    """Report bounded progress, including heartbeats within long episodes."""
+
+    def __init__(self, policy: str, episodes: int, completed_before: int, total: int, started: float):
+        self.policy = policy
+        self.episodes = episodes
+        self.completed_before = completed_before
+        self.total = total
+        self.started = started
+        self.next_report = started
+
+    def __call__(self, completed: int, control_steps: int) -> None:
+        now = time.perf_counter()
+        if control_steps != 0 and completed != self.episodes and now < self.next_report:
+            return
+        print(
+            f"Evaluation {self.policy}: {completed}/{self.episodes} episodes, "
+            f"{control_steps:,} control steps; "
+            f"overall {self.completed_before + completed}/{self.total} episodes; "
+            f"elapsed {now - self.started:.1f}s",
+            flush=True,
+        )
+        self.next_report = now + 10.0
+
+
 def evaluate_checkpoint(
     checkpoint: Path,
     *,
@@ -251,12 +289,25 @@ def evaluate_checkpoint(
     torch.set_num_threads(1)
     env = SO101ReachEnv()
     try:
+        print(f"Loading evaluation checkpoint: {checkpoint}", flush=True)
         model, metadata = load_checked_policy(checkpoint, env)
         seeds = list(range(seed, seed + episodes))
-        results = {
-            policy: run_episodes(env, seeds, model=model if policy == "trained" else None, policy=policy, render=render and policy == "trained")
-            for policy in ("trained", "no_motion", "random")
-        }
+        policies = ("trained", "no_motion", "random")
+        total_episodes = len(policies) * episodes
+        print(
+            f"Checkpoint evaluation: {episodes} episodes per policy x {len(policies)} policies "
+            f"= {total_episodes} episodes; at most {total_episodes * env.max_steps:,} control steps. "
+            "Progress is reported every 10 seconds and at each policy's completion.",
+            flush=True,
+        )
+        started = time.perf_counter()
+        results = {}
+        for index, policy in enumerate(policies):
+            results[policy] = run_episodes(
+                env, seeds, model=model if policy == "trained" else None,
+                policy=policy, render=render and policy == "trained",
+                progress=_EvaluationProgress(policy, episodes, index * episodes, total_episodes, started),
+            )
         return {
             "schema_version": 1,
             "created_utc": datetime.now(timezone.utc).isoformat(),

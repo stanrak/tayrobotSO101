@@ -562,6 +562,15 @@ def _run(args, output: Path) -> None:
             return
         save_checkpoint(model, output / "final_model.zip", signature, evaluation_callback.training_metadata())
         training_seconds = time.perf_counter() - start_time
+        write_json(output / "training.json", {
+            "status": "evaluating", "mode": config["mode"], "config": config,
+            "environment": signature, **progress(), "training_seconds": training_seconds,
+            "heldout_checkpoint": "best_model.zip", "task_performance_evaluated": False,
+        })
+        print(f"Training finished. Final checkpoint saved to {output / 'final_model.zip'}.", flush=True)
+        print(f"Starting held-out evaluation: 3 policies x {args.heldout_episodes:,} episodes "
+              f"({3 * args.heldout_episodes:,} total). "
+              "Press Ctrl+C to stop evaluation; saved checkpoints are retained.", flush=True)
         heldout_started = time.perf_counter()
         try:
             report = evaluate_checkpoint(output / "best_model.zip", episodes=args.heldout_episodes, seed=20_000)

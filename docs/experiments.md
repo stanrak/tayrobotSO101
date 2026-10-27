@@ -60,7 +60,11 @@ A normally completed full-training run evaluates its best checkpoint on held-out
 - A no-motion baseline using the reset pose's stationary action.
 - A random-action baseline receiving identical seeded initial conditions.
 
-Held-out evaluation has additional simulation cost beyond the requested training transition count. A user interruption saves the current full-training policy and skips the final held-out path. Trial mode has no validation, baseline comparisons, checkpoint selection, or held-out task score.
+Held-out evaluation runs these three policies sequentially in one environment, outside the requested training transition count. The default is 300 episodes in total, with up to 360,000 additional control steps. `--heldout-episodes` sets the episode count **per policy**; smaller counts reduce runtime and statistical precision.
+
+`final_model.zip` is saved before this phase. The `Monitor` and `DummyVecEnv` messages after final validation come from loading the selected checkpoint for evaluation; they do not indicate result packaging. The terminal identifies checkpoint loading and each policy's start, reports in-flight progress about every ten seconds, and prints each policy's completion. Progress includes completed episodes, control steps, and overall elapsed time.
+
+Before held-out evaluation begins, `training.json` records status `evaluating` and the measured training counters. `evaluation.json` is written only after the complete report is available. Ctrl+C saves the current full-training policy and records status `interrupted`; it skips any remaining held-out work. Trial mode has no validation, baseline comparisons, checkpoint selection, or held-out task score.
 
 Reports contain success counts/rates and Wilson 95% intervals; collision and timeout counts; episode length and return; final/minimum distance; and hold progress. Per-episode termination reasons help distinguish approach, precision, holding, collision, and timeout problems. Reward values use the original environment units, regardless of training reward scale.
 
