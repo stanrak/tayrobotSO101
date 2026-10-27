@@ -46,7 +46,7 @@ The parent checkpoint's bytes and metadata are retained. Continuation creates a 
 | `cumulative_timesteps` / `cumulative_optimizer_steps` / `cumulative_update_count` / `cumulative_optimization_epochs` | Parent baseline plus observed work in this session. |
 | `phase_seconds` | Timing accumulated only in this session. |
 
-For example, a 300,000-transition checkpoint followed by a 200,000-transition session yields `actual_timesteps=200000` and `cumulative_timesteps=500000`. Counts refer to the selected checkpoint, not all independent runs stored on disk. Legacy records without measured cumulative or lineage fields remain blank in comparisons; no values are invented by summing unrelated runs.
+Cumulative counts equal the selected checkpoint's starting counts plus the observed session work. Counts refer to the selected checkpoint, not all independent runs stored on disk. Legacy records without measured cumulative or lineage fields remain blank in comparisons; no values are invented by summing unrelated runs.
 
 Checkpoint ZIPs preserve policy weights and optimizer state, while logs and evaluation scores remain records rather than a replay dataset. A resumed session starts fresh environment trajectories using its seed. State restoration checks hashes, task/environment/assets, package versions, reward scale, optimizer availability, and continuation counters. Unsupported older states fail clearly and are not automatically migrated. See [Training](training.md) for commands and compatible settings.
 
@@ -117,5 +117,5 @@ Replace `<parent>` with the actual path before running the command.
 
 Writer locks protect training, standalone evaluation, and catalog rebuilding from concurrent modification. The existing `runs/.current.lock` name remains compatible with older processes. The operating system releases the lock after the writer exits, including after a crash; deleting the lock file is not a way to safely unlock an active process.
 
-Existing `runs/current/`, `runs/history/`, `checkpoints/`, and `reports/` records remain historical local artifacts. Generated learning GIFs and run outputs are excluded from ordinary Git tracking. New experiment folders include a local ignore marker, including custom output folders. A clean checkout may therefore have no trained checkpoint or historical report. Static simulation images can remain part of the documentation.
+Existing `runs/current/`, `runs/history/`, `checkpoints/`, and `reports/` records remain historical local artifacts. Run outputs, generated learning GIFs, detailed reviews, and their measurements are confidential local artifacts excluded from Git tracking. Detailed reviews belong under `report/`; public documentation keeps only general technical descriptions, process, and broad progress. New experiment folders include a local ignore marker, including custom output folders. A clean checkout may therefore have no trained checkpoint or historical report. Static simulation images can remain part of the documentation.
 

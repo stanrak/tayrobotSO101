@@ -23,7 +23,8 @@ This repository develops a MuJoCo simulation of the SO-101 robot and a PPO reach
 ## Documentation ownership
 
 - Root `README.md` is a concise project overview for human readers.
-- `docs/` contains human explanations, operation guides, technical references, and project stages. Readers must be able to understand those documents without consulting agent instructions or private files.
+- `docs/` contains human explanations, operation guides, technical references, and project stages. Readers must be able to understand those documents without consulting agent instructions or private files. Describe training methods, process, and broad qualitative achievements here; detailed results from actual runs are confidential local records in ignored `report/`.
+- Keep detailed run reviews and comparisons in `report/training_review_<date>_<run-suffix>/review.md`. Preserve raw experiment artifacts at their existing local paths. Do not link confidential artifacts from versioned documentation or source.
 - `AGENTS.md` and `instructions/` are written for agents. Put agent procedures and constraints here rather than in reader documentation.
 - Write agent-maintained documents in English. Keep user-owned files unchanged.
 - Keep this entry path stable. When instruction files are split or renamed, update local links and the explicit source snapshot allowlist without adding private or otherwise unapproved user-owned guidance.

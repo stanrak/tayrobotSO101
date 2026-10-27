@@ -153,6 +153,18 @@ class DiagnosticPPO(PPO):
                 if std is not None:
                     for joint, value in enumerate(std.reshape(len(indices), -1).mean(dim=0).cpu().tolist()):
                         self.logger.record(f"diagnostics/action_{joint}_std_mean", float(value))
+                # Unlike clipping of stored stochastic actions, this bounded
+                # observation sample measures means already outside the Box.
+                # A squashed distribution's latent mean is not an action mean.
+                if isinstance(self.action_space, gym.spaces.Box) and not getattr(self.policy, "squash_output", False):
+                    mean = getattr(distribution, "mean", None)
+                    if isinstance(mean, torch.Tensor):
+                        means = mean.reshape(len(indices), -1)
+                        low = torch.as_tensor(self.action_space.low.reshape(-1), device=means.device, dtype=means.dtype)
+                        high = torch.as_tensor(self.action_space.high.reshape(-1), device=means.device, dtype=means.dtype)
+                        outside = ((means < low) | (means > high)).float().mean(dim=0)
+                        for joint, value in enumerate(outside.cpu().tolist()):
+                            self.logger.record(f"diagnostics/action_{joint}_mean_outside_fraction", float(value))
             for name, value in saturation.items():
                 self.logger.record(name, value)
         finally:

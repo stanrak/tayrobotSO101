@@ -20,10 +20,10 @@ These documents explain how to use the SO-101 simulation, how the learning task 
 | [Training](training.md) | PPO modes, command options, transition budgets, viewer behavior, reward scaling, and critic diagnostics |
 | [Experiments](experiments.md) | Run folders, checkpoint compatibility, validation and held-out evaluation, comparison tables, and historical records |
 | [Development](development.md) | Source layout, component responsibilities, local checks, and verification limits |
-| [Project stages](project-stages.md) | Implemented capabilities, the saved learning baseline, and experiments still requiring measurement |
+| [Project stages](project-stages.md) | Implemented capabilities, broad learning progress, and remaining work |
 
 ## Reading results correctly
 
 Simulation time, training transitions, optimizer steps, and wall-clock time measure different things. A startup trial checks initialization and one optimizer step; it does not establish task performance. Validation selects a checkpoint, while held-out evaluation estimates performance on separate seeds. The [training](training.md) and [experiment](experiments.md) guides explain these distinctions.
 
-Generated run data and reports remain local. A fresh checkout includes the implementation and documentation, but may not contain the historical outputs discussed in a local review.
+Run data, detailed reviews, and measurements are confidential local artifacts. Detailed reviews belong under `report/`; versioned documentation contains general technical descriptions, process, and broad achievements. A fresh checkout includes the implementation and documentation without local results.

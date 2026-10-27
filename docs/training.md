@@ -27,7 +27,7 @@ To continue from the latest available full-training checkpoint:
 .\.venv\Scripts\python.exe -m so101_sim.train --resume latest --timesteps 200000 --seed 42
 ```
 
-`--timesteps` is the number of **additional transitions in this session**. Starting from a checkpoint at 300,000 transitions and requesting 200,000 records 200,000 session transitions and 500,000 cumulative transitions. The exact cap is measured from the checkpoint's starting count, including when the final rollout is incomplete. Validation cadence is also measured in the new session's transitions.
+`--timesteps` is the number of **additional transitions in this session**. Cumulative transitions equal the selected checkpoint's starting count plus the observed session transitions. The exact cap is measured from the checkpoint's starting count, including when the final rollout is incomplete. Validation cadence is also measured in the new session's transitions.
 
 `latest` resolves the existing latest-run pointer before the new output directory becomes the latest run. It uses the checkpoint selection described in [Experiment records](experiments.md), which prefers a best-validation checkpoint. To continue from a particular final or best policy, pass its path to `--resume` instead. Only supported full-training checkpoints can be resumed; `--trial --resume ...` is rejected before output creation.
 
@@ -81,9 +81,9 @@ Additional PPO settings are recorded in each run's `training.json`: batch size 2
 
 `RewardScale` multiplies the environment reward by 0.01 before PPO receives it. `Monitor` sits inside this wrapper, so episode logs, validation, and held-out reports retain the original reward units. The physical task, success threshold, action controller, and environment reward formula are unchanged by the multiplier.
 
-The scale was introduced as a controlled response to a nearly constant critic observed in an earlier saved run. A later fresh 300,000-transition run improved approach distance and critic fitting, but still recorded zero held-out successes; see [Project stages](project-stages.md). A short pilot can reveal better distance reduction or critic learning before any successful episode; it is not a learned-performance benchmark.
+Reward scaling is a controlled way to examine critic target magnitude while preserving raw task metrics. Approach behavior and critic fitting can improve before precise reaching and stable holding are reliable. Broad implementation progress is described in [Project stages](project-stages.md); run-specific reviews and measurements remain confidential local records under `report/`.
 
-Change one setting at a time. For example, compare a new run with `--learning-rate 0.0001`, then a separate run with `--target-kl 0.01`. Match task/environment signatures, budgets, seeds, and evaluation settings. Use `--reward-scale 1 --eval-frequency 25000` to reproduce the previous reward scale and validation cadence. Fresh runs do not automatically load earlier policies.
+Change one setting at a time. For example, compare a new run with `--learning-rate 0.0001`, then a separate run with `--target-kl 0.01`. Match task/environment signatures, budgets, seeds, and evaluation settings. Use `--reward-scale 1` to compare raw-reward training, with a matched validation cadence in both configurations. Fresh runs do not automatically load earlier policies.
 
 ## CPU parallelism
 
@@ -108,6 +108,7 @@ These are alternative flag sets, not standalone commands. Process communication 
 | `diagnostics/critic_tanh_*_saturation` | Fraction of sampled critic tanh outputs with absolute value above 0.999. |
 | `diagnostics/first_gradient_norm_after_clip` | Gradient norm for the first optimizer call, measured after SB3 clips it. |
 | `diagnostics/action_*` | Action clipping and conditional exploration standard deviation per action component. |
+| `diagnostics/action_*_mean_outside_fraction` | Fraction of the bounded observation sample whose unsquashed actor mean is outside the action limits; helps distinguish actor saturation from exploration-driven clipping. |
 | `rollout/mean_distance_m`, `rollout/minimum_distance_m`, `rollout/within_*mm_fraction` | Approach accuracy across the collected rollout. |
 | `rollout/maximum_hold_steps` | Progress toward sustained success. |
 

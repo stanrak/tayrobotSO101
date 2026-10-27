@@ -14,7 +14,7 @@ Read the [instruction index](instruction.md), [training contract](training.md), 
 
 - Record `run.json` provenance: command, seed, timestamps/status, Python/platform/package versions, Git revision/dirty state, and source hashes.
 - Retain an exact allowlisted source/config snapshot alongside training settings, environment signatures, checkpoints, metrics, actual transitions, and actual optimizer counts.
-- Keep snapshot selection explicit. Include relevant agent-maintained instructions when reorganizing their paths and retain existing allowlisted sources. Never add private files, credentials, arbitrary repository content, or otherwise unapproved user-owned guidance to snapshots.
+- Keep snapshot selection explicit. Include relevant agent-maintained instructions when reorganizing their paths and retain existing allowlisted sources. Never add `report/`, other result directories, private files, credentials, arbitrary repository content, or otherwise unapproved user-owned guidance to snapshots.
 - Preserve partial, failed, and interrupted runs accurately. Do not report planned counts as observed counts.
 - Do not automatically load policies or migrate historical checkpoints. Keep existing asset, environment-signature, package-version, and checkpoint-integrity checks.
 - An explicit full-training `--resume` may restore a compatible checkpoint under the [training continuation contract](training.md). Always create a new output record and keep parent files unchanged; record parent checkpoint path, SHA256, run identifier, and starting counters.
@@ -32,8 +32,17 @@ Read the [instruction index](instruction.md), [training contract](training.md), 
 
 ## Git and historical artifacts
 
-- Keep run results out of Git: `runs/`, historical `checkpoints/` and `reports/`, and generated learning GIFs remain ignored.
+- Treat detailed actual-run results as local and confidential, including measured metrics, run identifiers, checkpoint hashes, reviews, plots, timings, and log excerpts.
+- Keep run results out of Git: `report/`, `runs/`, historical `checkpoints/` and `reports/`, and generated learning GIFs remain ignored.
 - Every new experiment must contain a local ignore marker, including custom output folders.
 - Remove previously tracked result artifacts from the Git index without deleting local bytes. Ordinary runs do not rewrite Git history.
+- Index removal protects future commits; it does not erase prior commits or remote history. Any history purge is a separate reviewed destructive operation under the [workflow](workflow.md) requirements.
 - Static simulation documentation images may remain versioned.
 - Preserve locks and historical bytes during catalog/documentation work. Do not force-add results or use a reorganization as a reason to delete them.
+
+## Local reviews and versioned descriptions
+
+- Write detailed reviews and saved-data comparisons to `report/training_review_<date>_<run-suffix>/review.md`. The placeholders describe a naming template, not a run to create or evaluate.
+- Preserve raw runs, checkpoints, evaluations, and legacy reports at their original paths and bytes. A review may reference those local artifacts without moving or duplicating them into versioned files.
+- Keep `README.md`, `docs/`, source, test fixtures, and commit text free of detailed actual-run outputs and links to confidential artifacts. Versioned descriptions may explain the technical approach, training process, and broad qualitative achievements.
+- Do not include confidential run details in external requests or expand the source snapshot allowlist to include local reviews or result artifacts.
