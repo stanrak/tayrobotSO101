@@ -119,3 +119,13 @@ Writer locks protect training, standalone evaluation, and catalog rebuilding fro
 
 Existing `runs/current/`, `runs/history/`, `checkpoints/`, and `reports/` records remain historical local artifacts. Run outputs, generated learning GIFs, detailed reviews, and their measurements are confidential local artifacts excluded from Git tracking. Detailed reviews belong under `reports/`; public documentation keeps only general technical descriptions, process, and broad progress. New experiment folders include a local ignore marker, including custom output folders. A clean checkout may therefore have no trained checkpoint or historical report. Static simulation images can remain part of the documentation.
 
+## Save a finalized run with DVC
+
+After training and any optional standalone evaluation have finished, save the latest managed run locally:
+
+```powershell
+.\.venv\Scripts\python -m so101_sim.data add
+```
+
+This uses the separately installed DVC executable to cache the finalized run and create a Git-ignored pointer beside it. Each run has one saved pointer; existing pointers are preserved. The command does not start training or evaluation. See [Data versioning](data-versioning.md) for selecting another run, checking snapshot status, and retaining both the pointers and cache for recovery.
+

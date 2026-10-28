@@ -8,7 +8,7 @@ A MuJoCo simulation for exploring SO-101 robot control and reinforcement learnin
 
 You, my precious Hobbit fellow, not a cyber orge. There are some guide files in folder "private" you should see first. If there are not, you are the one who will create them. These files tell orge agents about the work, how they do the work and what they do not.
 
-I told them what and how I want this work going to do. I made a chatting space for them. In the private.
+I told them what and how I want this work going to do. I made a chatting space for them. In private.
 
 That should be your start.
 

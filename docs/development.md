@@ -20,6 +20,7 @@ The project separates manual interaction, the physical learning environment, tra
 | [`so101_sim/evaluate.py`](../so101_sim/evaluate.py) | Checked checkpoint loading, seeded comparisons, metrics, and policy playback. |
 | [`so101_sim/outputs.py`](../so101_sim/outputs.py) | Unique output directories, writer locks, and latest-checkpoint discovery. |
 | [`so101_sim/experiments.py`](../so101_sim/experiments.py) | Run provenance, source snapshots, finalization, and comparisons from saved records. |
+| [`so101_sim/data.py`](../so101_sim/data.py) | Explicit local DVC snapshots of finalized managed runs through the separately installed DVC executable. |
 | [`scripts/fetch_model.py`](../scripts/fetch_model.py) | Verification or restoration of the pinned upstream robot assets. |
 | [`assets/model_manifest.json`](../assets/model_manifest.json) | Upstream revision and per-file asset SHA256 values. |
 | `tests/` | Local unit and physical-contract checks. |
@@ -46,6 +47,7 @@ The local test suite covers:
 - Explicit checkpoint continuation, restored optimizer state, parent lineage, and separate session/cumulative counts.
 - Raw versus scaled rewards, sampled critic diagnostics, checkpoint compatibility, and subprocess ownership/cleanup.
 - Unique output records, locking, latest-run lookup, provenance allowlists, and comparison labels.
+- DVC snapshot target validation, writer-lock conflicts, immutable pointers, and subprocess arguments using synthetic runs.
 
 Training-budget tests use fake environments and optimizer counters rather than real learning runs. Checkpoint-continuation tests can save and restore synthetic model/optimizer state without taking environment steps or optimizing a network. Critic tests can use synthetic tensors, and worker-lifecycle tests use fake pipes/processes. Physical environment tests do step MuJoCo. Passing these tests verifies specified behavior, not the task success rate of a trained policy or the speed of real multiprocessing.
 
@@ -55,7 +57,10 @@ CLI help can be inspected without starting simulation or training:
 .\.venv\Scripts\python -m so101_sim.train --help
 .\.venv\Scripts\python -m so101_sim.evaluate --help
 .\.venv\Scripts\python -m so101_sim.experiments --help
+.\.venv\Scripts\python -m so101_sim.data --help
 ```
+
+DVC remains optional external tooling rather than a simulation dependency. The data command validates finalized managed runs and acquires the existing output writer lock before invoking DVC. It neither joins the training lifecycle nor launches learning. [Data versioning](data-versioning.md) explains local storage, status checks, and the separate pointer/cache backup requirements.
 
 ## Manual and performance verification
 

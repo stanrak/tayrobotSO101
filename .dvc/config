@@ -1,0 +1,7 @@
+[core]
+    no_scm = True
+    analytics = False
+    autostage = False
+    site_cache_dir = .dvc/site-cache
+[cache]
+    type = copy

@@ -1,0 +1,14 @@
+# Only finalized managed runs are archived by so101_sim.data.
+# Keep user guidance, local reviews, environments, and legacy data out of DVC.
+/private/
+/private-example/
+/.venv/
+/reports/
+/checkpoints/
+/runs/current/
+/runs/history/
+/runs/latest.json
+/runs/index.csv
+**/.*.lock
+**/__pycache__/
+*.py[cod]

@@ -46,3 +46,14 @@ Read the [instruction index](instruction.md), [training contract](training.md), 
 - Preserve raw runs, checkpoints, evaluations, and legacy reports at their original paths and bytes. A review may reference those local artifacts without moving or duplicating them into versioned files.
 - Keep `README.md`, `docs/`, source, test fixtures, and commit text free of detailed actual-run outputs and links to confidential artifacts. Versioned descriptions may explain the technical approach, training process, and broad qualitative achievements.
 - Do not include confidential run details in external requests or expand the source snapshot allowlist to include local reviews or result artifacts.
+
+## Local DVC snapshots
+
+- DVC is optional external tooling already installed on the user's machine. Use its executable on `PATH`; do not install it into the simulation environment or alter dependency pins as part of snapshot management.
+- Keep the project configuration detached from Git (`core.no_scm = true`), analytics disabled, and cache type `copy`. Run pointers, cached content, and local remote configuration remain confidential and Git-ignored.
+- Use `python -m so101_sim.data add [latest|runs/experiments/<run_directory>]` for an explicitly requested snapshot. Only finalized direct children of managed `runs/experiments/` are supported. Require terminal provenance with a finish timestamp, validate nested evaluations, reject links/junctions and protected payloads, and hold the existing global output writer lock through validation and the DVC subprocess.
+- Preserve run bytes and ignore markers with `dvc add --no-relink`. Refuse an existing run sidecar rather than overwriting its snapshot. Do not bypass validation with a raw add command against historical or active outputs.
+- Snapshot after any desired standalone evaluations finish. Later additions can make DVC status modified; they do not authorize replacing the earlier pointer. Each new training invocation retains its own separate run and pointer.
+- Do not add automatic DVC operations to training or evaluation, create training pipelines, configure a remote, or push content without the corresponding user request. Snapshot implementation and synthetic verification do not authorize caching actual historical runs.
+- Verify integration with disposable synthetic runs and mocked subprocesses, including terminal-state validation, lock conflicts, path/link rejection, existing-pointer rejection, and original-byte preservation. Keep real run identities, hashes, measurements, and log output out of versioned test fixtures and external requests.
+- Retain both sidecar metadata and the referenced cache for recovery. No-SCM mode supplies no Git revision history for pointers. A remote push transfers content; preserve pointers separately in the private backup. Reader commands and storage explanations belong in [the data guide](../docs/data-versioning.md).

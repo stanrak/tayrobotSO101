@@ -8,6 +8,7 @@ These documents explain how to use the SO-101 simulation, how the learning task 
 
 - **Use the simulator:** start with [getting started](getting-started.md), then read the [environment](environment.md) to understand the robot and physical ball.
 - **Train a policy:** read the [environment](environment.md), [training](training.md), and [experiments](experiments.md) pages in that order.
+- **Save data after training:** follow [data versioning](data-versioning.md) to keep a local DVC snapshot of a finalized run.
 - **Understand or develop the implementation:** read [development](development.md), then the technical page for the component you are changing.
 - **Review project progress:** read [project stages](project-stages.md), then use the experiment guide to examine local measurements.
 
@@ -19,6 +20,7 @@ These documents explain how to use the SO-101 simulation, how the learning task 
 | [Simulation environment](environment.md) | Desk and ball dynamics, goal placement, action/observation spaces, reward, and success conditions |
 | [Training](training.md) | PPO modes, command options, transition budgets, viewer behavior, reward scaling, and critic diagnostics |
 | [Experiments](experiments.md) | Run folders, checkpoint compatibility, validation and held-out evaluation, comparison tables, and historical records |
+| [Data versioning](data-versioning.md) | Local DVC snapshots of finalized runs, status checks, and private backup storage |
 | [Development](development.md) | Source layout, component responsibilities, local checks, and verification limits |
 | [Project stages](project-stages.md) | Implemented capabilities, broad learning progress, and remaining work |
 
