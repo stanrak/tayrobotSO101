@@ -13,7 +13,7 @@ import time
 from typing import Any
 
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList
-from stable_baselines3.common.logger import configure
+from stable_baselines3.common.logger import HumanOutputFormat, Logger, configure
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 import torch
@@ -33,6 +33,16 @@ LEARNING_DEFAULTS = {
     "log_std_init": -2.0, "learning_rate": 0.0003, "n_epochs": 10,
     "target_kl": None, "use_sde": False, "sde_sample_freq": -1,
 }
+
+
+def _configure_training_logger(output: Path) -> Logger:
+    logger = configure(str(output), ["stdout", "csv"])
+    for output_format in logger.output_formats:
+        if isinstance(output_format, HumanOutputFormat):
+            # SB3's default 36-character display truncates distinct diagnostic
+            # names to the same key and raises before the CSV writer can run.
+            output_format.max_length = 128
+    return logger
 
 
 def _inherit_resume_settings(args, checkpoint, provided: set[str]) -> None:
@@ -582,7 +592,7 @@ def _run(args, output: Path) -> None:
                 seed=args.seed,
                 verbose=1,
             )
-        model.set_logger(configure(str(output), ["stdout", "csv"]))
+        model.set_logger(_configure_training_logger(output))
         if not trial:
             target = "continuously" if args.timesteps is None else f"for {args.timesteps:,} new environment steps"
             print(f"Training {target}. Press Ctrl+C or close the viewer to stop and save final_model.zip.", flush=True)

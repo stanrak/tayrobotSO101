@@ -1,4 +1,4 @@
-"""Verify training modes and budgets with fake environments and a fake PPO."""
+"""Verify trainer budgets and logging without training a policy."""
 
 from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 import csv
@@ -17,7 +17,97 @@ import numpy as np
 
 from so101_sim import train
 from so101_sim import outputs
-from stable_baselines3.common.logger import Logger
+from so101_sim.diagnostics import RolloutControlDiagnostics
+from stable_baselines3.common.logger import HumanOutputFormat, Logger, configure
+
+
+def synthetic_diagnostic_metrics():
+    """Exercise real control metric names without a policy or environment."""
+    diagnostics = RolloutControlDiagnostics({
+        "observation_shape": [15], "action_shape": [3],
+        "action_low": [-1, -1, -1], "action_high": [1, 1, 1],
+        "task_config": {
+            "task": "SO101ReachableSurfaceBall-v3", "observation_version": 2,
+            "observation": "normalized q[:3], qvel[:3]*0.1, normalized ctrl[:3], current ball centre*3, (ball-ee)*5",
+            "action_low": [-0.5, -1.15, 0.8], "action_high": [0.5, -0.45, 1.6],
+            "dt": 0.05, "max_joint_speed_rad_s": 0.8,
+            "maximum_hold_joint_speed_rad_s": 0.3, "success_distance_m": 0.015,
+        },
+    })
+    previous = np.zeros(15)
+    previous[12] = 0.10
+    current = previous.copy()
+    current[3:6] = [-0.01, 0.01, 0]
+    current[6:9] = [-0.08, 0.08, 0]
+    current[12] = 0.05
+    raw_action = np.array([-2, 3, 0.25])
+    diagnostics.observe(
+        previous, raw_action, np.clip(raw_action, -1, 1), current, False,
+        [{"ball_linear_velocity": [0.01, 0, 0]}],
+    )
+    metrics = diagnostics.metrics()
+    # The policy diagnostics use the same formatter, including signed actor
+    # means and both bound directions. Values are synthetic, keys are real.
+    for joint in range(3):
+        for suffix in (
+            "clip_fraction", "sample_mean", "sample_min", "sample_max",
+            "lower_clip_fraction", "upper_clip_fraction", "lower_excess_mean",
+            "lower_excess_max", "upper_excess_mean", "upper_excess_max",
+            "mean_outside_fraction", "mean_signed_mean", "mean_min", "mean_max",
+            "mean_lower_outside_fraction", "mean_upper_outside_fraction",
+            "mean_lower_excess_mean", "mean_lower_excess_max",
+            "mean_upper_excess_mean", "mean_upper_excess_max",
+        ):
+            metrics[f"diagnostics/action_{joint}_{suffix}"] = float(joint + 0.25)
+    return metrics
+
+
+class TrainingLoggerTests(unittest.TestCase):
+    def test_default_sb3_stdout_reproduces_control_metric_truncation_collision(self):
+        with TemporaryDirectory(prefix="so101-logger-default-") as temporary:
+            with redirect_stdout(io.StringIO()):
+                logger = configure(temporary, ["stdout", "csv"])
+            try:
+                human = next(writer for writer in logger.output_formats if isinstance(writer, HumanOutputFormat))
+                self.assertEqual(human.max_length, 36)
+                for name, value in synthetic_diagnostic_metrics().items():
+                    logger.record(name, value)
+                with self.assertRaisesRegex(ValueError, "truncated.*already exists"):
+                    logger.dump(step=1)
+            finally:
+                logger.close()
+
+    def test_training_logger_preserves_all_diagnostic_names_in_stdout_and_csv(self):
+        metrics = synthetic_diagnostic_metrics()
+        # Include the exact colliding raw/absolute/min/max control key family
+        # and the longest conditional groups, rather than only short fixtures.
+        for suffix in ("mean", "abs_mean", "abs_max", "min", "max"):
+            self.assertIn(f"diagnostics/control_joint_0_executed_action_{suffix}", metrics)
+        self.assertIn("diagnostics/control_goal_entry_joint_speed_norm_rad_s_abs_mean", metrics)
+        self.assertIn("diagnostics/action_0_mean_upper_outside_fraction", metrics)
+        with TemporaryDirectory(prefix="so101-logger-configured-") as temporary:
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                logger = train._configure_training_logger(Path(temporary))
+            try:
+                self.assertEqual(len(logger.output_formats), 2)
+                human = next(writer for writer in logger.output_formats if isinstance(writer, HumanOutputFormat))
+                self.assertEqual(human.max_length, 128)
+                for name, value in metrics.items():
+                    logger.record(name, value)
+                logger.dump(step=1)
+            finally:
+                logger.close()
+            for name in metrics:
+                self.assertIn(name.split("/", 1)[1], stream.getvalue())
+            self.assertNotIn("...", stream.getvalue())
+            with (Path(temporary) / "progress.csv").open(encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                rows = list(reader)
+            self.assertCountEqual(reader.fieldnames, metrics)
+            self.assertEqual(len(reader.fieldnames), len(metrics))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual({name: float(value) for name, value in rows[0].items()}, metrics)
 
 
 class CountingEnvironment(gym.Env):
@@ -441,6 +531,38 @@ class StartupTrialTests(unittest.TestCase):
         fake.validation.return_value.eval_env.close.assert_called_once()
         fake.viewer.return_value.close.assert_called_once()
         self.assertEqual(model.num_timesteps, 501)
+
+    def test_full_training_uses_configured_real_logger_for_diagnostic_dump(self):
+        metrics = synthetic_diagnostic_metrics()
+        stream = io.StringIO()
+        fake_learn = RolloutRoundingPPO.learn
+
+        def configure_to_stream(folder, formats):
+            with redirect_stdout(stream):
+                return configure(folder, formats)
+
+        def learn_with_real_dump(model, *args, **kwargs):
+            for name, value in metrics.items():
+                model.logger.record(name, value)
+            model.logger.dump(step=model.num_timesteps)
+            return fake_learn(model, *args, **kwargs)
+
+        with (
+            self.fake_full_training(),
+            patch.object(train, "configure", side_effect=configure_to_stream) as configuration,
+            patch.object(train, "_configure_training_logger", wraps=train._configure_training_logger) as logger_setup,
+            patch.object(RolloutRoundingPPO, "learn", learn_with_real_dump),
+        ):
+            train.main(["--timesteps", "1", "--output", str(self.output)])
+        logger_setup.assert_called_once_with(self.output.resolve())
+        configuration.assert_called_once_with(str(self.output.resolve()), ["stdout", "csv"])
+        self.assertIn("control_joint_0_executed_action_abs_mean", stream.getvalue())
+        with (self.output / "progress.csv").open(encoding="utf-8", newline="") as handle:
+            row = next(csv.DictReader(handle))
+        self.assertEqual({name: float(value) for name, value in row.items()}, metrics)
+        self.assertEqual(sum(env.step_calls for env in CountingEnvironment.instances), 1)
+        self.assertEqual(RolloutRoundingPPO.instances[0].policy.optimizer.step_calls, 0)
+        self.assertTrue(all(env.closed for env in CountingEnvironment.instances))
 
     def test_legacy_full_training_alias_keeps_rollout_and_validation_defaults(self):
         with self.fake_full_training() as fake:

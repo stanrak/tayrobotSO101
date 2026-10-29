@@ -149,3 +149,15 @@ Passive control aggregation runs in the rollout callback and is included in roll
 
 SAC, `VecNormalize`, observation extensions, and reward shaping are possible future experiments rather than enabled options. The current implementation and diagnostic results do not establish that any of them improves this task.
 
+## Recover after a logging failure
+
+The console logger allows long diagnostic names so SB3 can display distinct metrics without truncating them to the same key. `progress.csv` retains the full metric names and values.
+
+If an earlier logging failure stopped a run before it saved a checkpoint, `--resume latest` selects that failed run and cannot find a policy to restore. Read its `training.json` and select the existing path in `config.parent_checkpoint` explicitly:
+
+```powershell
+.\.venv\Scripts\python -m so101_sim.train --resume "<parent_checkpoint>" --timesteps 300000
+```
+
+Replace `<parent_checkpoint>` with the actual path. Continuation starts from the saved checkpoint's counters; updates made after that checkpoint and never saved cannot be recovered. The retry creates a new experiment directory and retains the failed run. The separate `so101_sim.data add` command saves a finalized run to DVC; it does not start or resume training.
+
