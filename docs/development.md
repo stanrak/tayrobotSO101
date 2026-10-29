@@ -14,6 +14,8 @@ The project separates manual interaction, the physical learning environment, tra
 | [`so101_sim/env.py`](../so101_sim/env.py) | Physical workspace, reachable ball sampling, observations/actions/reward, success, and reset cadence. |
 | [`so101_sim/train.py`](../so101_sim/train.py) | Continuous/bounded PPO training, single-update trials, fixed-seed validation, checkpoints, and CLI settings. |
 | [`so101_sim/learning.py`](../so101_sim/learning.py) | Training-only reward scaling and PPO diagnostics from already collected data. |
+| [`so101_sim/diagnostics.py`](../so101_sim/diagnostics.py) | Bounded-memory signed action, observed control/tracking, and near-goal summaries without extra simulation or action sampling. |
+| [`so101_sim/lineage.py`](../so101_sim/lineage.py) | Exact-parent saved-validation matching and separate continuation comparison records. |
 | [`so101_sim/resume.py`](../so101_sim/resume.py) | Continuation compatibility checks and restoration of diagnostic PPO state and optimizer. |
 | [`so101_sim/training_view.py`](../so101_sim/training_view.py) | Observation of actual training state through independent viewer model/data copies. |
 | [`so101_sim/vector_env.py`](../so101_sim/vector_env.py) | Optional subprocess environment startup and bounded worker cleanup. |
@@ -46,10 +48,12 @@ The local test suite covers:
 - Exact session transition caps, first-update stopping, actual optimizer counters, KL stopping, and interruption records.
 - Explicit checkpoint continuation, restored optimizer state, parent lineage, and separate session/cumulative counts.
 - Raw versus scaled rewards, sampled critic diagnostics, checkpoint compatibility, and subprocess ownership/cleanup.
+- Signed action bounds, physical control/tracking units, terminal-observation handling, bounded diagnostic storage, and unchanged random-generator state.
+- Exact-parent saved-validation matching, unavailable-baseline reasons, and independent child-best/latest-run selection.
 - Unique output records, locking, latest-run lookup, provenance allowlists, and comparison labels.
 - DVC snapshot target validation, writer-lock conflicts, immutable pointers, and subprocess arguments using synthetic runs.
 
-Training-budget tests use fake environments and optimizer counters rather than real learning runs. Checkpoint-continuation tests can save and restore synthetic model/optimizer state without taking environment steps or optimizing a network. Critic tests can use synthetic tensors, and worker-lifecycle tests use fake pipes/processes. Physical environment tests do step MuJoCo. Passing these tests verifies specified behavior, not the task success rate of a trained policy or the speed of real multiprocessing.
+Training-budget tests use fake environments and optimizer counters rather than real learning runs. Checkpoint-continuation tests can save and restore synthetic model/optimizer state without taking environment steps or optimizing a network. Diagnostic tests use synthetic observations/actions and saved-parent comparison tests use synthetic records; neither requires new policy evaluation. Critic tests can use synthetic tensors, and worker-lifecycle tests use fake pipes/processes. Physical environment tests do step MuJoCo. Passing these tests verifies specified behavior, not the task success rate of a trained policy or the speed of real multiprocessing.
 
 CLI help can be inspected without starting simulation or training:
 

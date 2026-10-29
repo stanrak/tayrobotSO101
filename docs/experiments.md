@@ -25,6 +25,7 @@ Omitting `--output` selects this managed layout. A custom training output must b
 | `final_model.zip` and metadata | Policy saved at the end of full training or on a user interruption. |
 | `trial_model.zip` and metadata | Policy after the trial's first optimizer step. |
 | `evaluations.csv`, `best_validation.json` | Periodic validation summaries and the best validation episode report. |
+| `parent_comparison.json` | For continuation, availability and outcome of the child's validation comparison against the exact selected parent's saved validation. |
 | `evaluation.json` | Final held-out report when full training completes and evaluation succeeds. |
 
 Failed and interrupted runs retain the observed status and counts. An abrupt process kill can leave a previously recorded running status with partial logs. Missing evaluation metrics mean they were not measured, rather than zero performance.
@@ -49,6 +50,16 @@ The parent checkpoint's bytes and metadata are retained. Continuation creates a 
 Cumulative counts equal the selected checkpoint's starting counts plus the observed session work. Counts refer to the selected checkpoint, not all independent runs stored on disk. Legacy records without measured cumulative or lineage fields remain blank in comparisons; no values are invented by summing unrelated runs.
 
 Checkpoint ZIPs preserve policy weights and optimizer state, while logs and evaluation scores remain records rather than a replay dataset. A resumed session starts fresh environment trajectories using its seed. State restoration checks hashes, task/environment/assets, package versions, reward scale, optimizer availability, and continuation counters. Unsupported older states fail clearly and are not automatically migrated. See [Training](training.md) for commands and compatible settings.
+
+## Compare continuation with its selected parent
+
+A resumed run writes `parent_comparison.json` separately from its own checkpoint selection. The baseline must belong to the exact parent checkpoint chosen by `--resume`: the selected ZIP must have the same verified SHA256 as that run's saved best ZIP. Their checkpoint environments must match, and both records' session/cumulative transition counts must agree with the saved validation. Validation episode seeds must match the child's ordered seed list and episode budget; the selected checkpoint also passes the normal continuation compatibility checks. A validation report's own checkpoint hash is checked when present; new reports include it. The comparison reads existing records and does not evaluate the parent or search earlier ancestors for a substitute.
+
+The nested `parent.status` identifies an `available` or `unavailable` baseline. The overall `status` is `pending` until the child has a completed validation, then `better`, `equal`, or `worse`; a missing or mismatched baseline produces `unavailable` with a `reason`. For example, a selected final checkpoint from an interrupted run may have no validation tied to that exact saved state; the parent's best-validation score then cannot stand in for it. Even identical policy weights in different ZIP archives do not establish an exact hash match. Different validation seeds or episode budgets also prevent comparison. Missing evidence does not imply that the parent or child performed poorly.
+
+The comparison uses the same ranking as child checkpoint selection: higher success rate, then lower mean final distance, then higher raw return. `recommendation` names the child for a better score and the parent for an equal or worse score; it is unavailable before a valid comparison. This compares reused validation data and does not provide a new held-out result or statistical proof of improvement. The first completed child validation still creates `best_model.zip`, and later improvements replace it within the child run. Held-out evaluation continues to use the child's best checkpoint. A weaker child receives an explicit comparison result; it does not trigger a rollback, copy the parent checkpoint, or change `runs/latest.json` from the newest run to a stronger older run.
+
+After each child validation, the terminal prints `Session-best validation versus selected parent` with the comparison status and recommendation. Here `better` and `worse` describe the child's session best relative to the selected parent, rather than the latest validation relative to the child's previous round. The JSON file retains the availability reason, both scores, and child-best checkpoint identity/counters for later inspection.
 
 ## Validation and held-out results
 

@@ -2,6 +2,7 @@
 
 from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 import csv
+import hashlib
 import io
 import json
 import math
@@ -16,6 +17,7 @@ import numpy as np
 
 from so101_sim import train
 from so101_sim import outputs
+from stable_baselines3.common.logger import Logger
 
 
 class CountingEnvironment(gym.Env):
@@ -862,6 +864,34 @@ class StartupTrialTests(unittest.TestCase):
         resumed.fake.checkpoint.assert_not_called()
         self.assertTrue(all(env.closed for env in CountingEnvironment.instances))
 
+    def test_resume_records_exact_parent_baseline_before_restoring_policy(self):
+        record = self.resume_record()
+        seeds = list(range(10_000, 10_020))
+        baseline = {
+            "status": "available", "reason": None, "seeds": seeds,
+            "parent_checkpoint": str(record.path),
+            "parent_checkpoint_sha256": record.metadata["checkpoint_sha256"],
+            "summary": {"success_rate": 0.0, "mean_final_distance_m": .02, "mean_return": -3},
+            "score": [0.0, -.02, -3],
+        }
+        with self.fake_resume_training(record) as resumed, patch.object(
+            train, "load_parent_validation", return_value=baseline,
+        ) as parent_validation:
+            restore = resumed.load.side_effect
+
+            def checked_restore(parent, vector, *, seed):
+                comparison = json.loads((self.output / "parent_comparison.json").read_text())
+                self.assertEqual(comparison["status"], "pending")
+                self.assertEqual(comparison["parent"]["parent_checkpoint_sha256"], "parent-digest")
+                return restore(parent, vector, seed=seed)
+
+            resumed.load.side_effect = checked_restore
+            train.main(["--resume", str(record.path), "--timesteps", "2048", "--output", str(self.output)])
+        parent_validation.assert_called_once_with(record.path, record.metadata, seeds)
+        self.assertIs(resumed.fake.validation.call_args.kwargs["parent_validation"], baseline)
+        report = json.loads((self.output / "training.json").read_text())
+        self.assertEqual(report["config"]["parent_comparison_file"], "parent_comparison.json")
+
     def test_trial_rejects_resume_before_inspection_or_output(self):
         with (
             patch.object(train, "inspect_resume_checkpoint") as inspect,
@@ -959,6 +989,141 @@ class ValidationMetricsTests(unittest.TestCase):
         self.assertEqual(metadata["actual_timesteps"], 100_000)
         self.assertEqual(metadata["cumulative_timesteps"], 400_000)
         self.assertEqual(self.callback.next_evaluation, 500_000)
+
+    def test_control_diagnostics_receive_existing_pre_step_and_terminal_data(self):
+        previous = np.zeros((1, 15), dtype=np.float32)
+        raw = np.array([[2, 0, -2]], dtype=np.float32)
+        executed = np.clip(raw, -1, 1)
+        reset = np.ones((1, 15), dtype=np.float32)
+        dones = np.array([True])
+        infos = [{"terminal_observation": previous.copy(), "distance": .02, "hold_steps": 0}]
+        self.callback.model._last_obs = previous
+        self.callback.control_diagnostics = MagicMock()
+        self.callback.control_diagnostics.metrics.return_value = {"diagnostics/control_observed_samples": 1}
+        self.callback.locals = dict(actions=raw, clipped_actions=executed, new_obs=reset, dones=dones, infos=infos)
+        self.callback.num_timesteps = 1
+        self.callback._on_rollout_start()
+        self.callback._on_step()
+        arguments = self.callback.control_diagnostics.observe.call_args.args
+        for observed, original in zip(arguments, (previous, raw, executed, reset, dones, infos)):
+            self.assertIs(observed, original)
+        self.callback.control_diagnostics.reset.assert_called_once()
+        self.callback._on_rollout_end()
+        self.logger.record.assert_any_call("diagnostics/control_observed_samples", 1)
+        self.assertEqual(self.callback.eval_env.step_calls, 0)
+
+    def test_empty_conditional_metrics_do_not_reuse_an_earlier_undumped_rollout(self):
+        logger = Logger(None, [])
+        self.callback.model.logger = logger
+        self.callback.control_diagnostics = MagicMock()
+        near_key = "diagnostics/control_near_15mm_joint_speed_norm_rad_s_mean"
+        self.callback.control_diagnostics.metrics.side_effect = [
+            {"diagnostics/control_near_15mm_samples": 1, near_key: .2},
+            {"diagnostics/control_near_15mm_samples": 0},
+        ]
+        logger.record("unrelated/metric", 17)
+        self.callback._on_rollout_end()
+        self.assertEqual(logger.name_to_value[near_key], .2)
+        self.callback._on_rollout_end()
+        self.assertNotIn(near_key, logger.name_to_value)
+        self.assertEqual(logger.name_to_value["diagnostics/control_near_15mm_samples"], 0)
+        self.assertEqual(logger.name_to_value["unrelated/metric"], 17)
+
+    @staticmethod
+    def validation_report(distance, episode_return):
+        return {
+            "policy": "trained",
+            "summary": {"episodes": 2, "successes": 0, "success_rate": 0.0,
+                        "mean_final_distance_m": distance, "mean_return": episode_return},
+            "episodes": [{"seed": seed, "steps": 7, "is_success": False,
+                          "final_distance_m": distance, "return": episode_return}
+                         for seed in (10_000, 10_001)],
+        }
+
+    def available_parent(self):
+        summary = self.validation_report(.02, -3.0)["summary"]
+        return {"status": "available", "reason": None, "seeds": [10_000, 10_001],
+                "parent_checkpoint": "synthetic_parent/best_model.zip",
+                "parent_checkpoint_sha256": "synthetic-parent-digest",
+                "summary": summary, "score": [0.0, -.02, -3.0]}
+
+    @staticmethod
+    def save_synthetic_checkpoint(model, path, signature, training):
+        path.write_bytes(f"synthetic-child-{training['actual_timesteps']}".encode())
+
+    def test_weaker_child_still_saves_its_own_best_and_only_flags_parent_recommendation(self):
+        parent = self.available_parent()
+        self.callback.parent_validation = parent
+        self.callback.starting_timesteps = 300_000
+        self.callback.num_timesteps = 400_000
+        pointer = Path(self.temporary.name) / "latest.json"
+        pointer.write_bytes(b"synthetic-newest-run-pointer")
+        original_pointer = pointer.read_bytes()
+        reports = [self.validation_report(.05, -5), self.validation_report(.06, -6),
+                   self.validation_report(.01, -1)]
+        with (
+            patch.object(train, "run_episodes", side_effect=reports) as episodes,
+            patch.object(train, "save_checkpoint", side_effect=self.save_synthetic_checkpoint) as checkpoint,
+            redirect_stdout(io.StringIO()),
+        ):
+            self.callback.evaluate()
+            self.assertEqual(checkpoint.call_count, 1)
+            output = Path(self.temporary.name)
+            record = json.loads((output / "parent_comparison.json").read_text())
+            self.assertEqual(record["status"], "worse")
+            self.assertEqual(record["recommendation"], "parent")
+            self.assertEqual(record["child_best"]["session_timesteps"], 100_000)
+            self.assertEqual(record["child_best"]["cumulative_timesteps"], 400_000)
+            digest = hashlib.sha256((output / "best_model.zip").read_bytes()).hexdigest()
+            self.assertEqual(record["child_best"]["checkpoint_sha256"], digest)
+            self.assertEqual(json.loads((output / "best_validation.json").read_text())["checkpoint_sha256"], digest)
+            self.callback.num_timesteps = 500_000
+            self.callback.evaluate()
+            record = json.loads((output / "parent_comparison.json").read_text())
+            self.assertEqual(record["child_summary"]["mean_final_distance_m"], .05)
+            self.assertEqual(record["child_best"]["session_timesteps"], 100_000)
+            self.assertEqual(checkpoint.call_count, 1)
+            self.callback.num_timesteps = 600_000
+            self.callback.evaluate()
+            record = json.loads((output / "parent_comparison.json").read_text())
+            self.assertEqual(record["status"], "better")
+            self.assertEqual(record["recommendation"], "child")
+            self.assertEqual(checkpoint.call_count, 2)
+            self.callback._on_training_end()
+            self.assertEqual(episodes.call_count, 3)
+        self.assertEqual(pointer.read_bytes(), original_pointer)
+        self.assertEqual(self.callback.eval_env.step_calls, 0)
+        self.assertEqual(parent["score"], [0.0, -.02, -3.0])
+
+    def test_equal_child_recommends_parent_without_suppressing_child_checkpoint(self):
+        self.callback.parent_validation = self.available_parent()
+        with (
+            patch.object(train, "run_episodes", return_value=self.validation_report(.02, -3)),
+            patch.object(train, "save_checkpoint", side_effect=self.save_synthetic_checkpoint) as checkpoint,
+            redirect_stdout(io.StringIO()),
+        ):
+            self.callback.evaluate()
+        checkpoint.assert_called_once()
+        record = json.loads((Path(self.temporary.name) / "parent_comparison.json").read_text())
+        self.assertEqual((record["status"], record["recommendation"]), ("equal", "parent"))
+
+    def test_unavailable_parent_does_not_trigger_parent_evaluation_or_disable_child_best(self):
+        self.callback.parent_validation = {"status": "unavailable", "reason": "No matching saved validation."}
+        with (
+            patch.object(train, "run_episodes", return_value=self.validation_report(.05, -5)) as episodes,
+            patch.object(train, "save_checkpoint", side_effect=self.save_synthetic_checkpoint) as checkpoint,
+            redirect_stdout(io.StringIO()),
+        ):
+            self.callback.evaluate()
+        episodes.assert_called_once()
+        checkpoint.assert_called_once()
+        record = json.loads((Path(self.temporary.name) / "parent_comparison.json").read_text())
+        self.assertEqual(record["status"], "unavailable")
+        self.assertEqual(record["reason"], "No matching saved validation.")
+        self.assertTrue((Path(self.temporary.name) / "best_model.zip").is_file())
+        metadata = self.callback.training_metadata()["parent_validation_comparison"]
+        self.assertEqual(metadata["status"], "unavailable")
+        self.assertEqual(metadata["file"], "parent_comparison.json")
 
 
 if __name__ == "__main__":

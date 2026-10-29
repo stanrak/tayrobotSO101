@@ -6,6 +6,7 @@ import argparse
 from contextlib import ExitStack
 import csv
 from datetime import datetime, timezone
+import hashlib
 import math
 from pathlib import Path
 import time
@@ -18,8 +19,10 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 import torch
 
 from .env import SO101ReachEnv
+from .diagnostics import RolloutControlDiagnostics
 from .evaluate import environment_signature, evaluate_checkpoint, run_episodes, save_checkpoint, write_json
 from .learning import DiagnosticPPO as PPO, RewardScale
+from .lineage import compare_parent_validation, load_parent_validation
 from .outputs import OutputError, current_checkpoint, training_output
 from .resume import ResumeError, inspect_resume_checkpoint, load_resume_policy
 from .vector_env import ManagedSubprocVecEnv as SubprocVecEnv
@@ -123,6 +126,7 @@ class FixedSeedEvaluation(BaseCallback):
         start_time: float,
         progress=lambda: {},
         starting_timesteps: int = 0,
+        parent_validation: dict[str, Any] | None = None,
     ):
         super().__init__()
         self.output = output
@@ -140,11 +144,17 @@ class FixedSeedEvaluation(BaseCallback):
         self.rollout_distances = []
         self.rollout_max_hold = 0
         self.best_score: tuple[float, float, float] | None = None
+        self.best_validation_summary: dict[str, Any] | None = None
+        self.best_validation_timesteps: int | None = None
+        self.best_checkpoint_sha256: str | None = None
+        self.parent_validation = parent_validation
+        self.control_diagnostics = RolloutControlDiagnostics(signature)
+        self.control_metric_keys: set[str] = set()
         self.eval_env = SO101ReachEnv()
         self.last_evaluation = -1
 
     def training_metadata(self) -> dict[str, Any]:
-        return {
+        metadata = {
             **self.training_config,
             **self.progress(),
             "actual_timesteps": self.num_timesteps - self.starting_timesteps,
@@ -152,6 +162,30 @@ class FixedSeedEvaluation(BaseCallback):
             "elapsed_seconds": time.perf_counter() - self.start_time,
             "validation_seeds": self.eval_seeds,
         }
+        if self.parent_validation is not None:
+            comparison = compare_parent_validation(self.parent_validation, self.best_validation_summary)
+            metadata["parent_validation_comparison"] = {
+                "file": "parent_comparison.json", "status": comparison["status"],
+                "recommendation": comparison["recommendation"],
+                "scope": "session_best_vs_selected_parent_validation",
+            }
+        return metadata
+
+    def _publish_parent_comparison(self) -> None:
+        if self.parent_validation is None:
+            return
+        comparison = compare_parent_validation(self.parent_validation, self.best_validation_summary)
+        checkpoint = self.output / "best_model.zip"
+        comparison["child_best"] = None if self.best_validation_summary is None else {
+            "checkpoint": checkpoint.name,
+            "checkpoint_sha256": self.best_checkpoint_sha256,
+            "session_timesteps": self.best_validation_timesteps,
+            "cumulative_timesteps": self.starting_timesteps + self.best_validation_timesteps,
+            "validation_seeds": self.eval_seeds,
+        }
+        write_json(self.output / "parent_comparison.json", comparison)
+        print(f"Session-best validation versus selected parent: {comparison['status']} "
+              f"(recommendation: {comparison['recommendation']}).", flush=True)
 
     def evaluate(self) -> dict[str, Any]:
         started = time.perf_counter()
@@ -186,11 +220,19 @@ class FixedSeedEvaluation(BaseCallback):
         )
         if self.best_score is None or score > self.best_score:
             self.best_score = score
+            self.best_validation_summary = dict(summary)
+            self.best_validation_timesteps = self.num_timesteps - self.starting_timesteps
             save_checkpoint(self.model, self.output / "best_model.zip", self.signature, self.training_metadata())
+            checkpoint = self.output / "best_model.zip"
+            self.best_checkpoint_sha256 = (hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+                                           if checkpoint.is_file() else None)
             write_json(self.output / "best_validation.json", {
                 "timesteps": self.num_timesteps - self.starting_timesteps,
                 "cumulative_timesteps": self.num_timesteps, **report,
+                **({"checkpoint_sha256": self.best_checkpoint_sha256}
+                   if self.best_checkpoint_sha256 is not None else {}),
             })
+        self._publish_parent_comparison()
         self.last_evaluation = self.num_timesteps
         self.logger.record("validation/success_rate", summary["success_rate"])
         self.logger.record("validation/mean_final_distance_m", summary["mean_final_distance_m"])
@@ -204,6 +246,11 @@ class FixedSeedEvaluation(BaseCallback):
         return report
 
     def _on_step(self) -> bool:
+        self.control_diagnostics.observe(
+            getattr(self.model, "_last_obs", None), self.locals.get("actions"),
+            self.locals.get("clipped_actions"), self.locals.get("new_obs"),
+            self.locals.get("dones"), self.locals.get("infos"),
+        )
         for info in self.locals.get("infos", []):
             distance = info.get("distance")
             if distance is not None and math.isfinite(distance):
@@ -217,8 +264,20 @@ class FixedSeedEvaluation(BaseCallback):
     def _on_rollout_start(self) -> None:
         self.rollout_distances = []
         self.rollout_max_hold = 0
+        self.control_diagnostics.reset()
 
     def _on_rollout_end(self) -> None:
+        # SB3 dumps every few rollouts. Omitted conditional metrics must not
+        # retain an earlier rollout's near-goal values in its pending logger.
+        for attribute in ("name_to_value", "name_to_count", "name_to_excluded"):
+            pending = getattr(self.logger, attribute, None)
+            if isinstance(pending, dict):
+                for name in self.control_metric_keys:
+                    pending.pop(name, None)
+        control_metrics = self.control_diagnostics.metrics()
+        self.control_metric_keys = set(control_metrics)
+        for name, value in control_metrics.items():
+            self.logger.record(name, value)
         self.logger.record("time/session_timesteps", self.num_timesteps - self.starting_timesteps)
         self.logger.record("time/cumulative_timesteps", self.num_timesteps)
         if self.rollout_distances:
@@ -397,6 +456,13 @@ def _run(args, output: Path) -> None:
             signature = environment_signature(probe)
         finally:
             probe.close()
+    parent_validation = None
+    if resume is not None:
+        parent_validation = load_parent_validation(
+            resume.path, resume.metadata, list(range(10_000, 10_000 + args.eval_episodes)),
+        )
+        config["parent_comparison_file"] = "parent_comparison.json"
+        write_json(output / "parent_comparison.json", compare_parent_validation(parent_validation, None))
     write_json(
         output / "training.json",
         {"status": "trial_running" if trial else "running", "mode": config["mode"],
@@ -471,6 +537,7 @@ def _run(args, output: Path) -> None:
                 start_time=start_time,
                 progress=progress,
                 starting_timesteps=starting["timesteps"],
+                parent_validation=parent_validation,
             )
             evaluation_callback = callback
         if args.viewer:

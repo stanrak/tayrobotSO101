@@ -29,6 +29,8 @@ Read the [instruction index](instruction.md), [training contract](training.md), 
 - Compare matching task/environment signatures, evaluation seeds, and budgets. Retain checkpoint identities/hashes, reward scale, backend, learning settings, optimizer counts, and timing scopes needed to interpret a comparison.
 - For resumed runs, retain parent lineage and starting/session/cumulative counters in the catalog and finalized provenance. Phase timings describe the new session only. Checkpoint selection can choose a parent best policy earlier than its final model; use the selected checkpoint's counters rather than the parent run's final totals.
 - Distinguish best-validation checkpoint metrics, the last recorded validation, and actual final/held-out evaluation. Do not present the last validation as a new evaluation of the final checkpoint.
+- For continuation, write a separate `parent_comparison.json` against the exact selected parent's saved validation only. Require matching checkpoint hash/counters, environment signature, ordered validation seeds, and evaluation budget. Do not load/evaluate policies, search ancestors, or substitute a parent's best-validation score for an unvalidated final/interrupted checkpoint.
+- Record comparison availability, pending child validation, better/equal/worse outcome, and explicit unavailability reasons. Compare using the existing success/final-distance/return ordering. Preserve session-local `best_model.zip`, including the first child validation, and child-best held-out evaluation. Keep `latest.json` as the newest managed run; comparison must not silently roll back, copy/select the parent, or alter historical bytes.
 
 ## Git and historical artifacts
 

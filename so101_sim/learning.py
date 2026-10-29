@@ -116,10 +116,28 @@ class DiagnosticPPO(PPO):
 
         if isinstance(self.action_space, gym.spaces.Box):
             actions = flattened(buffer.actions).reshape(len(targets), -1)
-            clipped = (actions < self.action_space.low.reshape(-1)) | (actions > self.action_space.high.reshape(-1))
+            low = self.action_space.low.reshape(-1)
+            high = self.action_space.high.reshape(-1)
+            lower = actions < low
+            upper = actions > high
+            clipped = lower | upper
             self.logger.record("diagnostics/action_component_clip_fraction", float(np.mean(clipped)))
             for joint in range(actions.shape[1]):
-                self.logger.record(f"diagnostics/action_{joint}_clip_fraction", float(np.mean(clipped[:, joint])))
+                prefix = f"diagnostics/action_{joint}"
+                samples = actions[:, joint]
+                self.logger.record(f"{prefix}_clip_fraction", float(np.mean(clipped[:, joint])))
+                self.logger.record(f"{prefix}_sample_mean", float(np.mean(samples)))
+                self.logger.record(f"{prefix}_sample_min", float(np.min(samples)))
+                self.logger.record(f"{prefix}_sample_max", float(np.max(samples)))
+                for side, outside, excess in (
+                    ("lower", lower[:, joint], np.maximum(low[joint] - samples, 0)),
+                    ("upper", upper[:, joint], np.maximum(samples - high[joint], 0)),
+                ):
+                    self.logger.record(f"{prefix}_{side}_clip_fraction", float(np.mean(outside)))
+                    # Excess includes zeros for samples inside the bound. It
+                    # measures magnitude in action units independently of rate.
+                    self.logger.record(f"{prefix}_{side}_excess_mean", float(np.mean(excess)))
+                    self.logger.record(f"{prefix}_{side}_excess_max", float(np.max(excess)))
 
         indices = np.linspace(0, len(targets) - 1, min(len(targets), self.diagnostic_sample_size), dtype=int)
         observations = buffer.observations
@@ -128,16 +146,15 @@ class DiagnosticPPO(PPO):
         hooks = []
         saturation: dict[str, float] = {}
         value_layers = getattr(getattr(self.policy, "mlp_extractor", None), "value_net", None)
-        if value_layers is not None:
-            for index, layer in enumerate(module for module in value_layers.modules() if isinstance(module, torch.nn.Tanh)):
-                def record_saturation(module, arguments, result, index=index):
-                    saturation[f"diagnostics/critic_tanh_{index + 1}_saturation"] = float(
-                        (result.detach().abs() > 0.999).float().mean().item()
-                    )
-                hooks.append(layer.register_forward_hook(record_saturation))
-
         was_training = self.policy.training
         try:
+            if value_layers is not None:
+                for index, layer in enumerate(module for module in value_layers.modules() if isinstance(module, torch.nn.Tanh)):
+                    def record_saturation(module, arguments, result, index=index):
+                        saturation[f"diagnostics/critic_tanh_{index + 1}_saturation"] = float(
+                            (result.detach().abs() > 0.999).float().mean().item()
+                        )
+                    hooks.append(layer.register_forward_hook(record_saturation))
             self.policy.set_training_mode(False)
             with torch.no_grad():
                 tensor, _ = self.policy.obs_to_tensor(sample)
@@ -164,7 +181,19 @@ class DiagnosticPPO(PPO):
                         high = torch.as_tensor(self.action_space.high.reshape(-1), device=means.device, dtype=means.dtype)
                         outside = ((means < low) | (means > high)).float().mean(dim=0)
                         for joint, value in enumerate(outside.cpu().tolist()):
-                            self.logger.record(f"diagnostics/action_{joint}_mean_outside_fraction", float(value))
+                            prefix = f"diagnostics/action_{joint}_mean"
+                            joint_means = means[:, joint]
+                            self.logger.record(f"{prefix}_outside_fraction", float(value))
+                            self.logger.record(f"{prefix}_signed_mean", float(joint_means.mean().item()))
+                            self.logger.record(f"{prefix}_min", float(joint_means.min().item()))
+                            self.logger.record(f"{prefix}_max", float(joint_means.max().item()))
+                            for side, outside_bound, excess in (
+                                ("lower", joint_means < low[joint], (low[joint] - joint_means).clamp_min(0)),
+                                ("upper", joint_means > high[joint], (joint_means - high[joint]).clamp_min(0)),
+                            ):
+                                self.logger.record(f"{prefix}_{side}_outside_fraction", float(outside_bound.float().mean().item()))
+                                self.logger.record(f"{prefix}_{side}_excess_mean", float(excess.mean().item()))
+                                self.logger.record(f"{prefix}_{side}_excess_max", float(excess.max().item()))
             for name, value in saturation.items():
                 self.logger.record(name, value)
         finally:
