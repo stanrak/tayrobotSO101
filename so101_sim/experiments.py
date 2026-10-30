@@ -37,7 +37,8 @@ FIELDS = (
     "training_seconds", "learning_rate", "batch_size", "n_steps", "n_epochs",
     "gamma", "log_std_init", "target_kl", "use_sde", "sde_sample_freq",
     "rollout_seconds_including_callbacks", "optimization_seconds", "diagnostics_seconds", "validation_seconds",
-    "heldout_seconds", "eval_kind", "eval_seed_start", "eval_seed_end",
+    "heldout_seconds", "evaluation_profile", "eval_kind", "eval_complete",
+    "eval_requested_episodes", "eval_requested_policies", "eval_stop_reason", "eval_seed_start", "eval_seed_end",
     "eval_seed_sha256", "eval_episodes", "success_rate", "mean_return",
     "mean_final_distance_m", "evaluation_path", "evaluation_checkpoint_sha256",
     "metadata_error",
@@ -195,27 +196,45 @@ def _summary(report: dict[str, Any]) -> dict[str, Any]:
 
 def _evaluation_fields(report: dict[str, Any], *, kind: str, path: Path, root: Path) -> dict[str, Any]:
     summary = _summary(report)
-    if not summary:
+    results = report.get("results", {})
+    trained = results.get("trained", {}) if isinstance(results, dict) else {}
+    trained = trained if isinstance(trained, dict) else {}
+    # An explicitly bounded report remains evidence of attempted evaluation,
+    # even when no episode finished and no task-performance summary exists.
+    if not summary and "complete" not in report and "complete" not in trained:
         return {}
     episodes = report.get("episodes", [])
     seeds = [row["seed"] for row in episodes
              if isinstance(row, dict) and isinstance(row.get("seed"), int)] if isinstance(episodes, list) else []
     if not seeds:
-        results = report.get("results", {})
-        trained = results.get("trained", {}) if isinstance(results, dict) else {}
-        measured = trained.get("episodes", []) if isinstance(trained, dict) else []
+        measured = trained.get("episodes", [])
         seeds = [row["seed"] for row in measured
                  if isinstance(row, dict) and isinstance(row.get("seed"), int)] if isinstance(measured, list) else []
-    return {
+    complete = report.get("complete", trained.get("complete", ""))
+    partial = complete is False or trained.get("complete") is False
+    requested_policies = report.get("policies_requested", [])
+    requested_policies = requested_policies if isinstance(requested_policies, list) else []
+    fields = {
         "eval_kind": kind,
-        "eval_seed_start": report.get("evaluation_seed_start", min(seeds) if seeds else ""),
-        "eval_seed_end": report.get("evaluation_seed_end", max(seeds) if seeds else ""),
+        "eval_complete": complete,
+        # Performance columns describe the trained policy, so its requested
+        # episode count is the denominator to compare with eval_episodes.
+        "eval_requested_episodes": trained.get("requested_episodes", report.get("requested_episodes", "")),
+        "eval_requested_policies": ",".join(policy for policy in requested_policies if isinstance(policy, str)),
+        "eval_stop_reason": report.get("stopped_reason", trained.get("stopped_reason")) or "",
+        "eval_seed_start": (min(seeds) if seeds else "") if partial else report.get(
+            "evaluation_seed_start", min(seeds) if seeds else ""),
+        "eval_seed_end": (max(seeds) if seeds else "") if partial else report.get(
+            "evaluation_seed_end", max(seeds) if seeds else ""),
         "eval_seed_sha256": _digest(seeds) if seeds else "",
-        "eval_episodes": summary.get("episodes", ""),
+        "eval_episodes": summary.get("episodes", trained.get("completed_episodes", report.get("completed_episodes", ""))),
         **{key: summary.get(key, "") for key in ("success_rate", "mean_return", "mean_final_distance_m")},
         "evaluation_path": path.relative_to(root).as_posix(),
-        "evaluation_checkpoint_sha256": report.get("checkpoint_sha256", ""),
+        "evaluation_checkpoint_sha256": report.get("checkpoint_sha256") or "",
     }
+    if "evaluation_profile" in report:
+        fields["evaluation_profile"] = report["evaluation_profile"]
+    return fields
 
 
 def _run_row(directory: Path, root: Path) -> dict[str, Any]:
@@ -260,6 +279,7 @@ def _run_row(directory: Path, root: Path) -> dict[str, Any]:
         **{key: training.get(key, record.get(key, "")) for key in CUMULATIVE_FIELDS},
         **{key: config.get(key, record.get(key, "")) for key in LINEAGE_FIELDS},
         "num_envs": config.get("num_envs", ""),
+        "evaluation_profile": config.get("evaluation_profile", ""),
         "training_seconds": training.get("training_seconds", training.get("elapsed_seconds", "")),
         **{key: config.get(key, "") for key in (
             "learning_rate", "batch_size", "n_steps", "n_epochs", "gamma", "log_std_init",
@@ -276,8 +296,9 @@ def _run_row(directory: Path, root: Path) -> dict[str, Any]:
     if row["mode"] != "startup_trial":
         report_path = directory / "evaluation.json"
         report, report_error = _read_json(report_path)
-        if _summary(report):
-            row.update(_evaluation_fields(report, kind="heldout", path=report_path, root=root))
+        evaluation = _evaluation_fields(report, kind="heldout", path=report_path, root=root)
+        if evaluation:
+            row.update(evaluation)
         else:
             validation_path = directory / "best_validation.json"
             validation, validation_error = _read_json(validation_path)
@@ -323,12 +344,15 @@ def main() -> None:
             rows = refresh_catalog(args.root)
     except OutputError as exc:
         parser.error(str(exc))
-    columns = ("run_id", "mode", "seed", "status", "actual_timesteps", "eval_kind", "success_rate", "mean_final_distance_m")
+    columns = ("run_id", "mode", "seed", "status", "actual_timesteps", "evaluation_profile",
+               "eval_kind", "eval_complete", "eval_episodes", "eval_requested_episodes",
+               "success_rate", "mean_final_distance_m")
     print("\t".join(columns))
     for row in rows:
         print("\t".join(str(row.get(column, "")) for column in columns))
     print(f"Comparison index: {args.root / 'index.csv'} ({len(rows)} experiments)")
-    print("Compare matching task/environment signatures and evaluation seeds; blank metrics were not measured.")
+    print("Compare matching task/environment signatures, evaluation profiles, seeds and completed budgets; "
+          "partial reports are diagnostic and blank metrics were not measured.")
 
 
 if __name__ == "__main__":

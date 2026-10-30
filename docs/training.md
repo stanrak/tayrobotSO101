@@ -33,6 +33,14 @@ To continue from the latest available full-training checkpoint:
 
 `latest` resolves the existing latest-run pointer before the new output directory becomes the latest run. It uses the checkpoint selection described in [Experiment records](experiments.md), which prefers a best-validation checkpoint. To continue from a particular final or best policy, pass its path to `--resume` instead. Only supported full-training checkpoints can be resumed; `--trial --resume ...` is rejected before output creation.
 
+`latest` means the latest managed run, rather than the latest compatible policy. An earlier reach policy has three actions and 15 observations; the current grasp task has six actions and 39 observations. Finding that checkpoint successfully still cannot make it compatible. The resume error reports the saved/current tasks and shapes. For a fresh grasp run with a viewer and a 300,000-transition budget, use:
+
+```powershell
+.\.venv\Scripts\python -m so101_sim.train --timesteps 300000 --viewer
+```
+
+This starts new weights and optimizer state. Continuing a historical reach policy requires its matching source and environment; supplying its checkpoint path alone does not bypass the checks. Resume preflight rejects an incompatible checkpoint before allocating a new run or changing the latest pointer.
+
 Continuation restores policy weights, the Adam optimizer state, and cumulative training counters through `DiagnosticPPO`. The new session initializes environments and random generators using the selected seed. It does not restore the previous ball pose, unfinished episode, or partially collected rollout, so it is not an exact replay of an uninterrupted process.
 
 The checkpoint's learning settings are inherited. An explicitly supplied learning rate, epoch count, KL threshold, exploration setting, or initial log standard deviation must match the saved setting. Environment count, backend, viewer, seed, evaluation settings, and additional step budget can be chosen for the new session. A different environment count or seed can change subsequent learning trajectories.
@@ -53,7 +61,15 @@ The viewer runs at real time by default. Add `--viewer-speed 4` for four times s
 
 Ctrl+C or closing the viewer interrupts full training, saves `final_model.zip`, records the observed counts and interrupted status, and skips final held-out evaluation. Reaching a requested step limit instead completes the normal evaluation path. See [Experiment records](experiments.md) for checkpoint selection and report locations.
 
-After final validation, the trainer saves `final_model.zip` and evaluates the selected checkpoint against the no-motion and random-action baselines sequentially. This phase can take substantial time: the default 100 episodes per policy means 300 episodes and up to 360,000 additional control steps. The `Monitor` and `DummyVecEnv` messages at this point accompany checkpoint loading. Loading and policy-start messages, in-flight progress about every 30 seconds, and policy-completion messages identify the current work, completed episodes, control steps, and overall elapsed time. `training.json` records status `evaluating` and measured training counts before this phase; `evaluation.json` appears when the full report is complete.
+The default quick evaluation profile targets about five wall-clock minutes for final validation and held-out evaluation together. It requests five fixed-seed validation episodes and five held-out episodes of the trained policy. It runs no automatic no-motion or random-action baselines. The task, 1,200-step episode limit, physics and learning settings stay the same.
+
+The shared final budget starts when the final validation phase begins and includes checkpoint handling and any remaining final optimization before held-out work. Quick periodic validation rounds have a 60-second limit; final validation may use up to 120 seconds of the shared budget so a complete fixed-seed batch has more time to finish. Explicitly smaller budgets lower these limits. Earlier periodic rounds are outside the final five-minute budget. The deadline is cooperative: it is checked between resets and control steps. A reset, checkpoint operation or control step already running can finish after the deadline, and cleanup/report writing add some overhead.
+
+Only a validation round that completes every requested episode may select `best_model.zip` or compare with the selected parent. Partial rounds are retained as diagnostics. If no complete round exists, held-out evaluation explicitly uses `final_model.zip`. A time limit never changes a partial attempt into a task timeout or a failed completed episode. Zero completed episodes produce no success-rate or return summary.
+
+For the larger evaluation with no time budget, add `--evaluation-profile full`. This selects 20 validation episodes and 100 held-out episodes for each of the trained, no-motion and random-action policies, run sequentially. Explicit episode-count options override either profile's counts. Add `--eval-time-budget SECONDS` for a different positive wall-clock budget; it also applies to an explicitly bounded full profile.
+
+The terminal identifies checkpoint loading, each policy's start, in-flight progress about every 30 seconds, and completion or deadline stopping. Progress includes completed/requested episodes, control steps and elapsed time. `training.json` records status `evaluating` and measured training counts before held-out work. `evaluation.json` records completed episodes, any partial attempt and whether all requested work finished.
 
 ## Training settings
 
@@ -72,8 +88,10 @@ After final validation, the trainer saves `final_model.zip` and evaluates the se
 | `--sde-sample-freq` | `-1` | With gSDE, resample noise at rollout start only, or use a positive control-step interval. |
 | `--vec-env` | `dummy` | Sequential environments, or opt-in `subproc` workers. |
 | `--eval-frequency` | `100000` | Training transitions between periodic validation rounds. |
-| `--eval-episodes` | `20` | Fixed-seed validation episodes per round. |
-| `--heldout-episodes` | `100` | Episodes per policy in the final held-out report; smaller counts reduce runtime and statistical precision. |
+| `--evaluation-profile` | `quick` | Quick progress checks; `full` enables larger validation and held-out baseline comparisons. |
+| `--eval-time-budget` | `300` seconds for quick; unlimited for full | Shared final evaluation budget; positive explicit values override the profile default. |
+| `--eval-episodes` | `5` for quick; `20` for full | Requested fixed-seed validation episodes per round. |
+| `--heldout-episodes` | `5` for quick; `100` for full | Requested final held-out episodes per policy; quick runs only the trained policy. |
 | `--viewer-speed` | `1.0` | Positive display speed multiplier when using the viewer. |
 | `--output` | New managed directory | Optional custom empty training directory. |
 
@@ -129,7 +147,7 @@ The retained reach-task control diagnostics reconstruct three controlled joint p
 
 Near-goal summaries pair distance with joint speed, ball speed, goal entry, and hold progress. They distinguish reaching the 15 mm region from meeting the low-speed hold condition. `eligible_hold_samples` measures distance below 15 mm and joint-speed norm below 0.3 rad/s; it does not apply collision filtering, count a hold streak, or establish task success. `goal_entry_samples` counts outside-to-inside transitions, so one episode can contribute several entries. On an ending episode, diagnostics use its terminal observation and do not connect it to the next episode's reset pose. Missing terminal observations are counted rather than replaced by reset data. Ball-speed moments use only samples with valid ball-velocity info, counted by `control_ball_speed_samples`. Rollout summaries describe only the observed transitions in that rollout; sparse progress rows are not exhaustive lifetime measurements.
 
-PPO training samples actions, while validation uses deterministic predictions. Their success rates can differ because of both exploration noise and different state/seed distributions. Evaluate approach distance, velocity/holding behavior, timeout/collision causes, and repeated checkpoint results together.
+PPO training samples actions, while validation uses deterministic predictions. Their success rates can differ because of both exploration noise and different state/seed distributions. Evaluate approach distance, opposed-pad contact, unsupported lift, maximum stable-hold progress and failure causes together. Fixed seeds make repeated complete quick checks useful for observing progress before grasp success is common. Five episodes give coarse estimates, and a deadline may leave an easier or shorter subset of seeds completed. Partial summaries describe that subset and must not rank policies. Evaluation measures behavior; it does not update the policy or guarantee learning progress.
 
 `update_count` records completed PPO optimization phases containing at least one successful optimizer step. `optimizer_steps` records actual successful calls. `optimization_epochs` counts SB3 epochs entered and may include a partial epoch stopped by KL. These top-level counts describe the current session. Matching `cumulative_*` fields include the parent checkpoint's counts, and `starting_*` fields record that baseline. These counters remain distinct when early stopping or an interruption occurs.
 
@@ -145,7 +163,7 @@ In `progress.csv`, `time/total_timesteps`, `train/n_updates`, `train/rollout_upd
 | `validation` | Validation episode execution. |
 | `heldout` | Final held-out evaluation. |
 
-These durations overlap: periodic validation is inside rollout timing, while final validation occurs outside rollout collection. Adding or subtracting the entire validation duration does not produce a disjoint breakdown. Validation step/episode counts cover completed reports; an interrupted partial validation retains elapsed time without assigning missing counts.
+These durations overlap: periodic validation is inside rollout timing, while final validation occurs outside rollout collection. Adding or subtracting the entire validation duration does not produce a disjoint breakdown. Validation episode/control-step counts cover completed episodes from returned reports; unfinished-attempt steps have a separate partial counter. An interruption before a report returns still retains elapsed time without assigning missing counts.
 
 Passive control aggregation runs in the rollout callback and is included in rollout time. The `diagnostics` phase above measures the sampled actor/critic checks after optimization. These diagnostics preserve the observation/action interface, physical controller, reward, PPO settings, and checkpoint compatibility; they do not establish a learning improvement.
 

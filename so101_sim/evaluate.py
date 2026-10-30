@@ -145,6 +145,53 @@ def _sync_playback_view(viewer, model, data, state: np.ndarray) -> None:
         viewer.sync(state_only=True)
 
 
+def _deadline_expired(deadline: float | None) -> bool:
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _episode_results(
+    policy: str,
+    requested_episodes: int,
+    rows: list[dict[str, Any]],
+    *,
+    partial_episode: dict[str, Any] | None = None,
+    control_steps: int = 0,
+) -> dict[str, Any]:
+    """Summarize completed attempts only; unfinished attempts stay separate."""
+    summary = None
+    if rows:
+        successes = sum(row["is_success"] for row in rows)
+        summary = {
+            "episodes": len(rows),
+            "successes": successes,
+            "collision_episodes": sum(row["collision"] for row in rows),
+            "pinning_episodes": sum(row["pinning"] for row in rows),
+            "time_limit_episodes": sum(row["truncated"] for row in rows),
+            "success_rate": successes / len(rows),
+            "success_rate_95pct_wilson_interval": _success_interval(successes, len(rows)),
+            "mean_return": float(np.mean([row["return"] for row in rows])),
+            "mean_final_distance_m": float(np.mean([row["final_distance_m"] for row in rows])),
+            "median_final_distance_m": float(np.median([row["final_distance_m"] for row in rows])),
+            "mean_minimum_distance_m": float(np.mean([row["minimum_distance_m"] for row in rows])),
+            "mean_episode_steps": float(np.mean([row["steps"] for row in rows])),
+            "mean_final_hold_steps": float(np.mean([row["final_hold_steps"] for row in rows])),
+            "mean_maximum_hold_steps": float(np.mean([row["maximum_hold_steps"] for row in rows])),
+            "mean_maximum_lift_clearance_m": float(np.mean([row["maximum_lift_clearance_m"] for row in rows])),
+        }
+    complete = len(rows) == requested_episodes
+    return {
+        "policy": policy,
+        "summary": summary,
+        "episodes": rows,
+        "complete": complete,
+        "requested_episodes": requested_episodes,
+        "completed_episodes": len(rows),
+        "stopped_reason": None if complete else "wall_time_budget",
+        "partial_episode": partial_episode,
+        "control_steps": control_steps,
+    }
+
+
 def run_episodes(
     env: SO101GraspEnv,
     seeds: Iterable[int],
@@ -153,16 +200,24 @@ def run_episodes(
     policy: str = "trained",
     render: bool = False,
     progress: Callable[[int, int], None] | None = None,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """Roll out a policy; all baselines receive identical seeded initial conditions.
 
     Progress receives completed episodes and observed control steps, including
     steps from the current episode, without collecting additional transitions.
+    An optional absolute ``time.monotonic()`` deadline stops between operations;
+    only naturally completed episodes contribute to summary metrics.
     """
     if policy not in ("trained", "no_motion", "random"):
         raise ValueError(f"Unknown evaluation policy: {policy}")
     if policy == "trained" and model is None:
         raise ValueError("The trained policy requires a loaded PPO model.")
+    seeds = tuple(int(seed) for seed in seeds)
+    if not seeds:
+        raise ValueError("At least one evaluation episode is required.")
+    if _deadline_expired(deadline):
+        return _episode_results(policy, len(seeds), [])
     if render:
         import mujoco.viewer
 
@@ -171,6 +226,7 @@ def run_episodes(
         viewer_context = nullcontext(None)
     rows = []
     control_steps = 0
+    partial_episode = None
     with viewer_context as viewer:
         if progress is not None:
             progress(0, 0)
@@ -180,6 +236,8 @@ def run_episodes(
             with viewer.lock():
                 env.configure_camera(viewer.cam)
         for episode_seed in seeds:
+            if _deadline_expired(deadline):
+                break
             with viewer.lock() if viewer is not None else nullcontext():
                 observation, info = env.reset(seed=int(episode_seed))
                 stationary_action = np.asarray(env.neutral_action(), dtype=np.float32).copy()
@@ -192,7 +250,10 @@ def run_episodes(
             maximum_downward_force = 0.0
             done = False
             steps = 0
+            terminated = truncated = False
             while not done:
+                if _deadline_expired(deadline):
+                    break
                 step_start = time.perf_counter()
                 if viewer is not None and not viewer.is_running():
                     raise RuntimeError("Playback window closed before evaluation completed.")
@@ -202,6 +263,8 @@ def run_episodes(
                     action = stationary_action
                 else:
                     action = generator.uniform(env.action_space.low, env.action_space.high).astype(np.float32)
+                if _deadline_expired(deadline):
+                    break
                 with viewer.lock() if viewer is not None else nullcontext():
                     observation, reward, terminated, truncated, info = env.step(action)
                 steps += 1
@@ -217,47 +280,38 @@ def run_episodes(
                 if viewer is not None:
                     _sync_playback_view(viewer, env.model, env.data, viewer_state)
                     time.sleep(max(0.0, env.dt - (time.perf_counter() - step_start)))
-            rows.append(
-                {
-                    "seed": int(episode_seed),
-                    "return": episode_return,
-                    "steps": steps,
-                    "initial_distance_m": initial_distance,
-                    "final_distance_m": float(info["distance"]),
-                    "minimum_distance_m": minimum_distance,
-                    "final_hold_steps": int(info["hold_steps"]),
-                    "maximum_hold_steps": maximum_hold,
-                    "is_success": bool(info["is_success"]),
-                    "collision": bool(info.get("collision", False)),
-                    "pinning": bool(info.get("pinning", False)),
-                    "maximum_lift_clearance_m": maximum_clearance,
-                    "maximum_downward_robot_force_n": maximum_downward_force,
-                    "terminated": bool(terminated),
-                    "truncated": bool(truncated),
-                    "termination_reason": info.get("termination_reason") or ("success" if info["is_success"] else "collision" if info.get("collision", False) else "time_limit" if truncated else "other_failure"),
-                }
-            )
+            row = {
+                "seed": int(episode_seed),
+                "return": episode_return,
+                "steps": steps,
+                "initial_distance_m": initial_distance,
+                "final_distance_m": float(info["distance"]),
+                "minimum_distance_m": minimum_distance,
+                "final_hold_steps": int(info.get("hold_steps", 0)),
+                "maximum_hold_steps": maximum_hold,
+                "is_success": bool(info.get("is_success", False)),
+                "collision": bool(info.get("collision", False)),
+                "pinning": bool(info.get("pinning", False)),
+                "maximum_lift_clearance_m": maximum_clearance,
+                "maximum_downward_robot_force_n": maximum_downward_force,
+                "terminated": bool(terminated),
+                "truncated": bool(truncated),
+                "termination_reason": info.get("termination_reason") or ("success" if info.get("is_success", False) else "collision" if info.get("collision", False) else "time_limit" if truncated else "other_failure"),
+            }
+            if not done:
+                row.update(
+                    is_success=False, terminated=False, truncated=False,
+                    termination_reason="wall_time_budget",
+                )
+                partial_episode = row
+                break
+            rows.append(row)
             if progress is not None:
                 progress(len(rows), control_steps)
-    if not rows:
-        raise ValueError("At least one evaluation episode is required.")
-    successes = sum(row["is_success"] for row in rows)
-    summary = {
-        "episodes": len(rows),
-        "successes": successes,
-        "collision_episodes": sum(row["collision"] for row in rows),
-        "pinning_episodes": sum(row["pinning"] for row in rows),
-        "time_limit_episodes": sum(row["truncated"] for row in rows),
-        "success_rate": successes / len(rows),
-        "success_rate_95pct_wilson_interval": _success_interval(successes, len(rows)),
-        "mean_return": float(np.mean([row["return"] for row in rows])),
-        "mean_final_distance_m": float(np.mean([row["final_distance_m"] for row in rows])),
-        "median_final_distance_m": float(np.median([row["final_distance_m"] for row in rows])),
-        "mean_minimum_distance_m": float(np.mean([row["minimum_distance_m"] for row in rows])),
-        "mean_episode_steps": float(np.mean([row["steps"] for row in rows])),
-        "mean_final_hold_steps": float(np.mean([row["final_hold_steps"] for row in rows])),
-    }
-    return {"policy": policy, "summary": summary, "episodes": rows}
+    return _episode_results(
+        policy, len(seeds), rows, partial_episode=partial_episode,
+        control_steps=control_steps,
+    )
 
 
 class _EvaluationProgress:
@@ -291,37 +345,59 @@ def evaluate_checkpoint(
     episodes: int = 100,
     seed: int = 20_000,
     render: bool = False,
+    policies: tuple[str, ...] = ("trained", "no_motion", "random"),
+    deadline: float | None = None,
 ) -> dict[str, Any]:
+    """Evaluate selected policies, sharing an optional absolute monotonic deadline.
+
+    The unbounded default remains a complete three-policy held-out evaluation.
+    Budget exhaustion leaves unavailable summaries null, including when it
+    happens before environment construction or checkpoint validation.
+    """
     if episodes < 1:
         raise ValueError("episodes must be at least one")
-    torch.set_num_threads(1)
-    env = SO101GraspEnv()
+    if not policies or len(set(policies)) != len(policies):
+        raise ValueError("Evaluation policies must be nonempty and unique.")
+    if any(policy not in ("trained", "no_motion", "random") for policy in policies):
+        raise ValueError("Unknown evaluation policy.")
+    seeds = list(range(seed, seed + episodes))
+    results = {policy: _episode_results(policy, episodes, []) for policy in policies}
+    metadata = None
+    env = None
     try:
-        print(f"Loading evaluation checkpoint: {checkpoint}", flush=True)
-        model, metadata = load_checked_policy(checkpoint, env)
-        seeds = list(range(seed, seed + episodes))
-        policies = ("trained", "no_motion", "random")
-        total_episodes = len(policies) * episodes
-        print(
-            f"Checkpoint evaluation: {episodes} episodes per policy x {len(policies)} policies "
-            f"= {total_episodes} episodes; at most {total_episodes * env.max_steps:,} control steps. "
-            "Progress is reported every 30 seconds and at each policy's completion.",
-            flush=True,
-        )
-        started = time.perf_counter()
-        results = {}
-        for index, policy in enumerate(policies):
-            results[policy] = run_episodes(
-                env, seeds, model=model if policy == "trained" else None,
-                policy=policy, render=render and policy == "trained",
-                progress=_EvaluationProgress(policy, episodes, index * episodes, total_episodes, started),
+        if not _deadline_expired(deadline):
+            torch.set_num_threads(1)
+            env = SO101GraspEnv()
+        if env is not None and not _deadline_expired(deadline):
+            print(f"Loading evaluation checkpoint: {checkpoint}", flush=True)
+            model, metadata = load_checked_policy(checkpoint, env)
+            total_episodes = len(policies) * episodes
+            print(
+                f"Checkpoint evaluation: {episodes} episodes per policy x {len(policies)} policies "
+                f"= {total_episodes} episodes; at most {total_episodes * env.max_steps:,} control steps. "
+                "Progress is reported every 30 seconds and at each policy's completion.",
+                flush=True,
             )
+            started = time.perf_counter()
+            completed_before = 0
+            for policy in policies:
+                if _deadline_expired(deadline):
+                    break
+                results[policy] = run_episodes(
+                    env, seeds, model=model if policy == "trained" else None,
+                    policy=policy, render=render and policy == "trained",
+                    progress=_EvaluationProgress(policy, episodes, completed_before, total_episodes, started),
+                    deadline=deadline,
+                )
+                completed_before += results[policy]["completed_episodes"]
+        complete = all(result["complete"] for result in results.values())
         return {
             "schema_version": 1,
             "created_utc": datetime.now(timezone.utc).isoformat(),
             "checkpoint": str(checkpoint.resolve()),
-            "checkpoint_sha256": metadata["checkpoint_sha256"],
-            "environment": metadata["environment"],
+            "checkpoint_sha256": metadata["checkpoint_sha256"] if metadata is not None else None,
+            "environment": metadata["environment"] if metadata is not None else None,
+            "checkpoint_validation_completed": metadata is not None,
             "package_versions": package_versions(),
             "evaluation_seed_start": seed,
             "evaluation_seed_end": seed + episodes - 1,
@@ -329,10 +405,18 @@ def evaluate_checkpoint(
             "rendered_policy_playback": render,
             "viewer_physics_edits_ignored": render,
             "success_definition": "Both jaw pads carry force; ball bottom is at least 20mm above the tabletop without support; world/relative motion is slow for 10 consecutive control steps, with no failure.",
+            "policies_requested": list(policies),
+            "policies_completed": [policy for policy, result in results.items() if result["complete"]],
+            "complete": complete,
+            "requested_episodes": episodes * len(policies),
+            "completed_episodes": sum(result["completed_episodes"] for result in results.values()),
+            "control_steps": sum(result["control_steps"] for result in results.values()),
+            "stopped_reason": None if complete else "wall_time_budget",
             "results": results,
         }
     finally:
-        env.close()
+        if env is not None:
+            env.close()
 
 
 def main() -> None:

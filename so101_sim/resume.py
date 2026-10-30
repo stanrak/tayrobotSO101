@@ -100,6 +100,28 @@ def _verified_bytes(checkpoint: Path, expected_digest: Any) -> bytes:
     return content
 
 
+def _environment_mismatch(saved: Any, current: dict[str, Any]) -> str:
+    """Explain compatibility separately from checkpoint/run discovery."""
+    def describe(value: Any) -> tuple[Any, Any, Any]:
+        if not isinstance(value, dict):
+            return "unrecorded", "unrecorded", "unrecorded"
+        config = value.get("task_config")
+        task = config.get("task", "unrecorded") if isinstance(config, dict) else value.get("task", "unrecorded")
+        return task, value.get("observation_shape", "unrecorded"), value.get("action_shape", "unrecorded")
+
+    previous = describe(saved)
+    expected = describe(current)
+    detail = (f"Checkpoint found, but resume checkpoint environment does not match the current task, assets, or interface. "
+              f"Saved: task={previous[0]}, observations={previous[1]}, actions={previous[2]}. "
+              f"Current: task={expected[0]}, observations={expected[1]}, actions={expected[2]}. ")
+    if previous != expected:
+        detail += "Different tasks or observation/action layouts cannot share a resumed policy. "
+    else:
+        detail += "Task names and shapes agree, but source, task settings, or asset signatures differ. "
+    return (detail + "To start fresh on the current task, omit --resume. To continue this checkpoint, "
+            "use its matching code and environment; checkpoint migration is not automatic.")
+
+
 def inspect_resume_checkpoint(checkpoint: Path, signature: dict[str, Any]) -> ResumeCheckpoint:
     """Inspect only JSON/ZIP records; do not deserialize policy objects here."""
     checkpoint = Path(checkpoint).resolve()
@@ -113,7 +135,7 @@ def inspect_resume_checkpoint(checkpoint: Path, signature: dict[str, Any]) -> Re
         raise ResumeError("Unsupported resume checkpoint schema or algorithm; expected PPO schema 1.")
     content = _verified_bytes(checkpoint, metadata.get("checkpoint_sha256"))
     if metadata.get("environment") != signature:
-        raise ResumeError("Resume checkpoint environment does not match the current task, assets, or interface.")
+        raise ResumeError(_environment_mismatch(metadata.get("environment"), signature))
     if metadata.get("package_versions") != package_versions():
         raise ResumeError("Resume checkpoint package versions differ; use its recorded environment without migrating it.")
     training = metadata.get("training")

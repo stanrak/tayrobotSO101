@@ -137,6 +137,8 @@ class FixedSeedEvaluation(BaseCallback):
         progress=lambda: {},
         starting_timesteps: int = 0,
         parent_validation: dict[str, Any] | None = None,
+        validation_time_budget: float | None = None,
+        final_time_budget: float | None = None,
     ):
         super().__init__()
         self.output = output
@@ -148,6 +150,11 @@ class FixedSeedEvaluation(BaseCallback):
         self.next_evaluation = starting_timesteps + eval_frequency
         self.start_time = start_time
         self.progress = progress
+        self.validation_time_budget = validation_time_budget
+        self.final_time_budget = final_time_budget
+        self.final_deadline = None
+        self.validation_reports = 0
+        self.validation_partial_steps = 0
         self.validation_seconds = 0.0
         self.validation_episodes = 0
         self.validation_steps = 0
@@ -204,16 +211,36 @@ class FixedSeedEvaluation(BaseCallback):
         print(f"Session-best validation versus selected parent: {comparison['status']} "
               f"(recommendation: {comparison['recommendation']}).", flush=True)
 
-    def evaluate(self) -> dict[str, Any]:
+    def evaluate(self, *, deadline: float | None = None) -> dict[str, Any]:
+        if self.validation_time_budget is not None:
+            budget = self.validation_time_budget
+            if deadline is not None and self.final_time_budget is not None:
+                # Allow the final fixed batch more time to finish while keeping
+                # room for held-out work inside the shared completion budget.
+                budget = min(120.0, self.final_time_budget)
+            own_deadline = time.monotonic() + budget
+            deadline = own_deadline if deadline is None else min(deadline, own_deadline)
         started = time.perf_counter()
         try:
-            report = run_episodes(self.eval_env, self.eval_seeds, model=self.model)
+            options = {} if deadline is None else {"deadline": deadline}
+            report = run_episodes(self.eval_env, self.eval_seeds, model=self.model, **options)
         finally:
             evaluation_seconds = time.perf_counter() - started
             self.validation_seconds += evaluation_seconds
         self.validation_episodes += len(report["episodes"])
         self.validation_steps += sum(episode["steps"] for episode in report["episodes"])
-        summary = report["summary"]
+        partial_steps = int((report.get("partial_episode") or {}).get("steps", 0))
+        self.validation_partial_steps += partial_steps
+        self.validation_reports += 1
+        complete = bool(report.get("complete", True))
+        summary = report.get("summary") or {}
+        # Keep every observed partial batch, but only equal-size complete batches
+        # may select a checkpoint or enter the exact-parent comparison.
+        write_json(self.output / f"validation_{self.num_timesteps}_{self.validation_reports}.json", report)
+        summary_keys = ("episodes", "successes", "collision_episodes", "pinning_episodes",
+                        "time_limit_episodes", "success_rate", "mean_return", "mean_final_distance_m",
+                        "median_final_distance_m", "mean_minimum_distance_m", "mean_episode_steps",
+                        "mean_final_hold_steps", "mean_maximum_hold_steps", "mean_maximum_lift_clearance_m")
         row = {
             "timesteps": self.num_timesteps - self.starting_timesteps,
             "cumulative_timesteps": self.num_timesteps,
@@ -221,7 +248,10 @@ class FixedSeedEvaluation(BaseCallback):
             "evaluation_seconds": evaluation_seconds,
             "validation_seconds": self.validation_seconds,
             "validation_control_steps": self.validation_steps,
-            **{key: value for key, value in summary.items() if not isinstance(value, list)},
+            "complete": complete, "requested_episodes": len(self.eval_seeds),
+            "completed_episodes": len(report["episodes"]),
+            "stopped_reason": report.get("stopped_reason"), "partial_control_steps": partial_steps,
+            **{key: summary.get(key) for key in summary_keys},
         }
         csv_path = self.output / "evaluations.csv"
         needs_header = not csv_path.exists()
@@ -230,36 +260,43 @@ class FixedSeedEvaluation(BaseCallback):
             if needs_header:
                 writer.writeheader()
             writer.writerow(row)
-        score = (
-            summary["success_rate"],
-            -summary["mean_final_distance_m"],
-            summary["mean_return"],
-        )
-        if self.best_score is None or score > self.best_score:
-            self.best_score = score
-            self.best_validation_summary = dict(summary)
-            self.best_validation_timesteps = self.num_timesteps - self.starting_timesteps
-            save_checkpoint(self.model, self.output / "best_model.zip", self.signature, self.training_metadata())
-            checkpoint = self.output / "best_model.zip"
-            self.best_checkpoint_sha256 = (hashlib.sha256(checkpoint.read_bytes()).hexdigest()
-                                           if checkpoint.is_file() else None)
-            write_json(self.output / "best_validation.json", {
-                "timesteps": self.num_timesteps - self.starting_timesteps,
-                "cumulative_timesteps": self.num_timesteps, **report,
-                **({"checkpoint_sha256": self.best_checkpoint_sha256}
-                   if self.best_checkpoint_sha256 is not None else {}),
-            })
-        self._publish_parent_comparison()
+        eligible = complete and summary and summary.get("episodes") == len(self.eval_seeds)
+        if eligible:
+            score = (summary["success_rate"], -summary["mean_final_distance_m"], summary["mean_return"])
+            if self.best_score is None or score > self.best_score:
+                self.best_score = score
+                self.best_validation_summary = dict(summary)
+                self.best_validation_timesteps = self.num_timesteps - self.starting_timesteps
+                save_checkpoint(self.model, self.output / "best_model.zip", self.signature, self.training_metadata())
+                checkpoint = self.output / "best_model.zip"
+                self.best_checkpoint_sha256 = (hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+                                               if checkpoint.is_file() else None)
+                write_json(self.output / "best_validation.json", {
+                    "timesteps": self.num_timesteps - self.starting_timesteps,
+                    "cumulative_timesteps": self.num_timesteps, **report,
+                    **({"checkpoint_sha256": self.best_checkpoint_sha256}
+                       if self.best_checkpoint_sha256 is not None else {}),
+                })
+            self._publish_parent_comparison()
         self.last_evaluation = self.num_timesteps
-        self.logger.record("validation/success_rate", summary["success_rate"])
-        self.logger.record("validation/mean_final_distance_m", summary["mean_final_distance_m"])
-        self.logger.record("validation/mean_return", summary["mean_return"])
+        for name in ("success_rate", "mean_final_distance_m", "mean_return",
+                     "mean_maximum_lift_clearance_m", "mean_maximum_hold_steps"):
+            if name not in summary:
+                for attribute in ("name_to_value", "name_to_count", "name_to_excluded"):
+                    pending = getattr(self.logger, attribute, None)
+                    if isinstance(pending, dict):
+                        pending.pop(f"validation/{name}", None)
+            if name in summary:
+                self.logger.record(f"validation/{name}", summary[name])
+        self.logger.record("validation/complete", int(complete))
         self.logger.record("time/validation_seconds", self.validation_seconds)
         self.logger.record("validation/control_steps", self.validation_steps)
-        print(f"Validation at {self.num_timesteps - self.starting_timesteps:,} session steps "
-              f"({self.num_timesteps:,} cumulative): "
-              f"{summary['successes']}/{summary['episodes']} successes, "
-              f"mean final distance {summary['mean_final_distance_m'] * 1000:.1f} mm", flush=True)
+        self.logger.record("validation/partial_control_steps", self.validation_partial_steps)
+        outcome = (f"{summary['successes']}/{summary['episodes']} successes, "
+                   f"mean final distance {summary['mean_final_distance_m'] * 1000:.1f} mm") if summary else "no completed episodes"
+        print(f"Validation at {self.num_timesteps - self.starting_timesteps:,} session steps: "
+              f"{len(report['episodes'])}/{len(self.eval_seeds)} episodes, "
+              f"{'complete' if complete else 'time budget reached; not ranked'}; {outcome}", flush=True)
         return report
 
     def _on_step(self) -> bool:
@@ -285,7 +322,12 @@ class FixedSeedEvaluation(BaseCallback):
                 )
                 self.grasp_pinning_failures += int(info.get("pinning", False))
         if self.num_timesteps >= self.next_evaluation:
-            self.evaluate()
+            limit = self.training_config.get("environment_step_limit")
+            if (self.final_time_budget is not None and limit is not None
+                    and self.num_timesteps - self.starting_timesteps >= limit
+                    and self.final_deadline is None):
+                self.final_deadline = time.monotonic() + self.final_time_budget
+            self.evaluate(deadline=self.final_deadline)
             self.next_evaluation = self.num_timesteps + self.eval_frequency
         return True
 
@@ -330,9 +372,13 @@ class FixedSeedEvaluation(BaseCallback):
             self.logger.record("grasp/pinning_failures", self.grasp_pinning_failures)
 
     def _on_training_end(self) -> None:
-        if self.last_evaluation != self.num_timesteps:
-            self.evaluate()
-        self.eval_env.close()
+        if self.final_time_budget is not None and self.final_deadline is None:
+            self.final_deadline = time.monotonic() + self.final_time_budget
+        try:
+            if self.last_evaluation != self.num_timesteps:
+                self.evaluate(deadline=self.final_deadline)
+        finally:
+            self.eval_env.close()
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -357,8 +403,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--viewer-speed", type=_finite_float, default=1.0, help="Viewer simulation speed multiplier (default: 1, real time).")
     parser.add_argument("--envs", type=int, help="Parallel environments (startup trial: 1 only; full training default: 8).")
     parser.add_argument("--eval-frequency", type=int, default=100_000)
-    parser.add_argument("--eval-episodes", type=int, default=20)
-    parser.add_argument("--heldout-episodes", type=int, default=100)
+    parser.add_argument("--eval-episodes", type=int, help="Validation episodes per round (quick: 5; full: 20).")
+    parser.add_argument("--heldout-episodes", type=int, help="Held-out episodes per selected policy (quick: 5; full: 100).")
+    parser.add_argument("--evaluation-profile", choices=("quick", "full"), default="quick", help="Quick development checks (default), or full evaluation with both baselines.")
+    parser.add_argument("--eval-time-budget", type=_finite_float, help="Shared wall-clock seconds for final validation and held-out (quick: 300; full: uncapped).")
     parser.add_argument("--log-std-init", type=_finite_float, default=argparse.SUPPRESS, help="Finite initial Gaussian policy log standard deviation (fresh default: -2; resume: inherited).")
     parser.add_argument("--reward-scale", type=_finite_float, default=0.01, help="Positive training-only reward multiplier; Monitor and evaluations use raw rewards (default: 0.01).")
     parser.add_argument("--learning-rate", type=_finite_float, default=argparse.SUPPRESS, help="Fresh default: 0.0003; resume inherits the checkpoint value.")
@@ -368,6 +416,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--sde-sample-freq", type=int, default=argparse.SUPPRESS, help="Resample gSDE noise every N control steps, or -1 once per rollout (resume: inherited).")
     parser.add_argument("--vec-env", choices=("dummy", "subproc"), default="dummy", help="Environment backend; subproc is opt-in for headless full training.")
     args = parser.parse_args(argv)
+    quick = args.evaluation_profile == "quick"
+    args.eval_episodes = args.eval_episodes if args.eval_episodes is not None else (5 if quick else 20)
+    args.heldout_episodes = args.heldout_episodes if args.heldout_episodes is not None else (5 if quick else 100)
+    args.eval_time_budget = args.eval_time_budget if args.eval_time_budget is not None else (300.0 if quick else None)
+    if args.eval_time_budget is not None and args.eval_time_budget <= 0:
+        parser.error("eval-time-budget must be positive")
+    args.validation_time_budget = min(60.0, args.eval_time_budget) if quick else None
     provided_learning = {key for key in LEARNING_DEFAULTS if hasattr(args, key)}
     for key, default in LEARNING_DEFAULTS.items():
         if not hasattr(args, key):
@@ -479,6 +534,12 @@ def _run(args, output: Path) -> None:
         "validation_episodes": 0 if trial else args.eval_episodes,
         "heldout_episodes": 0 if trial else args.heldout_episodes,
         "heldout_seed_start": None if trial else 20_000,
+        "evaluation_profile": args.evaluation_profile,
+        "evaluation_time_budget_seconds": args.eval_time_budget,
+        "validation_time_budget_seconds": args.validation_time_budget,
+        "final_validation_time_budget_seconds": (min(120.0, args.eval_time_budget)
+                                                  if args.evaluation_profile == "quick" else None),
+        "heldout_policies": [] if trial else (["trained"] if args.evaluation_profile == "quick" else ["trained", "no_motion", "random"]),
         "checkpoint_loaded": False,
         "parent_checkpoint": str(resume.path) if resume is not None else None,
         "parent_checkpoint_sha256": resume.metadata["checkpoint_sha256"] if resume is not None else None,
@@ -560,7 +621,8 @@ def _run(args, output: Path) -> None:
             },
             "validation_episodes": evaluation_callback.validation_episodes if evaluation_callback is not None else 0,
             "validation_control_steps": evaluation_callback.validation_steps if evaluation_callback is not None else 0,
-            "validation_counts_scope": "completed reports; interrupted partial validation is excluded",
+            "validation_partial_control_steps": evaluation_callback.validation_partial_steps if evaluation_callback is not None else 0,
+            "validation_counts_scope": "completed episodes; partial episode steps recorded separately",
         }
 
     try:
@@ -578,6 +640,8 @@ def _run(args, output: Path) -> None:
                 progress=progress,
                 starting_timesteps=starting["timesteps"],
                 parent_validation=parent_validation,
+                validation_time_budget=args.validation_time_budget,
+                final_time_budget=args.eval_time_budget,
             )
             evaluation_callback = callback
         if args.viewer:
@@ -669,21 +733,35 @@ def _run(args, output: Path) -> None:
             return
         save_checkpoint(model, output / "final_model.zip", signature, evaluation_callback.training_metadata())
         training_seconds = time.perf_counter() - start_time
+        best_available = evaluation_callback.best_validation_summary is not None
+        heldout_checkpoint = "best_model.zip" if best_available else "final_model.zip"
+        final_deadline = evaluation_callback.final_deadline
+        if not isinstance(final_deadline, (int, float)):
+            final_deadline = time.monotonic() + args.eval_time_budget if args.eval_time_budget is not None else None
         write_json(output / "training.json", {
             "status": "evaluating", "mode": config["mode"], "config": config,
             "environment": signature, **progress(), "training_seconds": training_seconds,
-            "heldout_checkpoint": "best_model.zip", "task_performance_evaluated": False,
+            "heldout_checkpoint": heldout_checkpoint, "task_performance_evaluated": False,
         })
         print(f"Training finished. Final checkpoint saved to {output / 'final_model.zip'}.", flush=True)
-        print(f"Starting held-out evaluation: 3 policies x {args.heldout_episodes:,} episodes "
-              f"({3 * args.heldout_episodes:,} total). "
+        print(f"Starting held-out evaluation: {len(config['heldout_policies'])} policies x {args.heldout_episodes:,} episodes "
+              f"({len(config['heldout_policies']) * args.heldout_episodes:,} total), {args.evaluation_profile} profile. "
               "Press Ctrl+C to stop evaluation; saved checkpoints are retained.", flush=True)
         heldout_started = time.perf_counter()
         try:
-            report = evaluate_checkpoint(output / "best_model.zip", episodes=args.heldout_episodes, seed=20_000)
+            evaluation_options = {}
+            if args.evaluation_profile == "quick":
+                evaluation_options["policies"] = ("trained",)
+            if final_deadline is not None:
+                evaluation_options["deadline"] = final_deadline
+            report = evaluate_checkpoint(output / heldout_checkpoint, episodes=args.heldout_episodes,
+                                         seed=20_000, **evaluation_options)
         finally:
             heldout_seconds = time.perf_counter() - heldout_started
-        report["checkpoint"] = "best_model.zip"
+        report["checkpoint"] = heldout_checkpoint
+        report["evaluation_profile"] = args.evaluation_profile
+        report["evidence_scope"] = "development diagnostic" if args.evaluation_profile == "quick" else "full held-out evaluation"
+        report["checkpoint_selection"] = "validation_best" if best_available else "final_without_complete_validation"
         write_json(output / "evaluation.json", report)
         write_json(
             output / "training.json",
@@ -696,14 +774,21 @@ def _run(args, output: Path) -> None:
                 "training_seconds": training_seconds,
                 "total_seconds_including_heldout_evaluation": time.perf_counter() - start_time,
                 "finished_utc": datetime.now(timezone.utc).isoformat(),
-                "heldout_checkpoint": "best_model.zip",
+                "heldout_checkpoint": heldout_checkpoint,
                 "heldout_summaries": {name: result["summary"] for name, result in report["results"].items()},
+                "evaluation_complete": report.get("complete", True),
+                "evaluation_stop_reason": report.get("stopped_reason"),
+                "task_performance_evaluated": report.get("complete", True),
             },
         )
         for name, result in report["results"].items():
             summary = result["summary"]
-            print(f"Held-out {name}: {summary['successes']}/{summary['episodes']} successes, "
-                  f"mean final distance {summary['mean_final_distance_m'] * 1000:.1f} mm")
+            if summary is None:
+                print(f"Held-out {name}: budget reached before any episode completed; no score assigned.")
+            else:
+                print(f"Held-out {name}: {summary['successes']}/{summary['episodes']} successes, "
+                      f"mean final distance {summary['mean_final_distance_m'] * 1000:.1f} mm"
+                      f" ({'complete' if result.get('complete', True) else 'partial evidence'})")
         print(f"Training and held-out evaluation saved to {output}")
     except BaseException as exc:
         interrupted = isinstance(exc, KeyboardInterrupt)
