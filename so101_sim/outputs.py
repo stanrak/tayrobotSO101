@@ -12,7 +12,7 @@ import tempfile
 from uuid import uuid4
 
 
-RUNS_ROOT = Path(__file__).resolve().parents[1] / "runs"
+RUNS_ROOT = Path(__file__).resolve().parents[1] / "local-artifacts" / "runs"
 
 
 class OutputError(RuntimeError):
@@ -166,7 +166,7 @@ def current_checkpoint() -> Path:
         checkpoint = current_output() / name
         if checkpoint.is_file():
             return checkpoint
-    raise OutputError("No checkpoint is available in the latest experiment (or legacy runs/current). Finish a startup trial or wait for a checkpoint.")
+    raise OutputError("No checkpoint is available in the latest experiment (or legacy local-artifacts/runs/current). Finish a startup trial or wait for a checkpoint.")
 
 
 @contextmanager

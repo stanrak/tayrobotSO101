@@ -18,7 +18,7 @@ class OutputTests(unittest.TestCase):
     def setUp(self):
         self.temporary = TemporaryDirectory(prefix="so101-outputs-")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name) / "runs"
+        self.root = Path(self.temporary.name) / "local-artifacts" / "runs"
         replacement = patch.object(outputs, "RUNS_ROOT", self.root)
         replacement.start()
         self.addCleanup(replacement.stop)
@@ -139,7 +139,7 @@ class OutputTests(unittest.TestCase):
         # A disposable repository proves custom outputs are protected even
         # outside RUNS_ROOT and without the project's top-level ignore rules.
         repository = self.root.parent / "disposable_repository"
-        repository.mkdir()
+        repository.mkdir(parents=True)
         subprocess.run(["git", "init", "--quiet", str(repository)],
                        check=True, capture_output=True)
         custom = repository / "custom_training_run"

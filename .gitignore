@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 .*.lock
 .venv/
+/local-artifacts/
 runs/
 checkpoints/
 reports/

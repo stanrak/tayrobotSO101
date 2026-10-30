@@ -320,7 +320,7 @@ def main(argv: list[str] | None = None) -> None:
         "--timesteps", type=int,
         help="New training transitions in this session (default: unlimited); with --resume these are additional steps. With --trial: rollout budget before the first network update (at least 2; default: 500).",
     )
-    parser.add_argument("--output", type=Path, help="Optional custom empty directory. Default: a new experiment directory under runs/experiments for every invocation.")
+    parser.add_argument("--output", type=Path, help="Optional custom empty directory. Default: a new experiment directory under local-artifacts/runs/experiments for every invocation.")
     parser.add_argument("--resume", metavar="CHECKPOINT", help="Continue a full-training checkpoint, or 'latest'. --timesteps counts additional transitions; the default remains a fresh policy.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--viewer", "--render", action="store_true", help="Watch actual training in a live MuJoCo viewer (environment 0).")

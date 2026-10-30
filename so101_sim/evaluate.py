@@ -329,7 +329,7 @@ def evaluate_checkpoint(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, help="Checkpoint to inspect (default: latest managed experiment, with legacy runs/current fallback).")
+    parser.add_argument("--checkpoint", type=Path, help="Checkpoint to inspect (default: latest managed experiment, with legacy local-artifacts/runs/current fallback).")
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--seed", type=int, default=20_000)
     parser.add_argument("--output", type=Path, help="Optional new report file; existing files are rejected. Default: a unique evaluation directory next to the checkpoint.")

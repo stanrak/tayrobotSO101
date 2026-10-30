@@ -16,7 +16,7 @@ Read this file together with the [instruction index](instruction.md) and all oth
 - Do not edit, overwrite, rename, or delete `AGENTS.md` or every file in `private/`.
 - Treat every file in `private/` as confidential. Never stage, commit, export, echo to logs, or push those files or their contents to Git or external endpoints.
 - Do not copy private content into public documentation, code, experiment snapshots, issue text, or test fixtures.
-- Treat actual training and evaluation results as local and confidential. This includes detailed metrics, run identifiers, checkpoint hashes, reviews, plots, measured timings, and log excerpts. Keep detailed reviews in ignored `reports/`, and preserve raw records in their original local output directories.
+- Treat actual training and evaluation results as local and confidential. This includes detailed metrics, run identifiers, checkpoint hashes, reviews, plots, measured timings, and log excerpts. Keep detailed reviews in ignored `local-artifacts/reports/`, and preserve raw records in their original local output directories.
 - Do not copy confidential run details into tracked source, documentation, test fixtures, commit text, or external requests. Do not force-add local result artifacts to Git.
 - If a task conflicts with private guidance, halt and await written user confirmation after explaining the discrepancy without exposing sensitive information.
 - Preserve existing experiment artifacts. Do not use them as an automatic initial policy for the simulator or a fresh startup trial.
@@ -24,7 +24,7 @@ Read this file together with the [instruction index](instruction.md) and all oth
 ## Document maintenance
 
 - Keep the human overview in `README.md` concise; put technical explanations and project-stage descriptions in `docs/`.
-- Versioned documentation may describe training methods, process, and broad qualitative achievements. It must not include detailed per-run outputs or links to confidential local artifacts. Put detailed run reviews in `reports/training_review_<date>_<run-suffix>/review.md`, using a new local review directory as needed.
+- Versioned documentation may describe training methods, process, and broad qualitative achievements. It must not include detailed per-run outputs or links to confidential local artifacts. Put detailed run reviews in `local-artifacts/reports/training_review_<date>_<run-suffix>/review.md`, using a new local review directory as needed.
 - Put agent-specific procedures, architecture constraints, and maintenance requirements in `instructions/`. These agent-maintained instruction files may be versioned in Git.
 - Keep human guides descriptive and self-contained. Do not move agent authorization gates or private instructions into reader guides.
 - Maintain links between the reader overview and the appropriate `docs/` pages, and between this instruction index and the agent procedures.

@@ -21,19 +21,19 @@ After training has finished or stopped, finish any optional standalone evaluatio
 Omitting the target selects `latest`, using the managed latest-run pointer. To select another managed run, replace `<run_directory>` below with its directory name:
 
 ```powershell
-.\.venv\Scripts\python -m so101_sim.data add "runs/experiments/<run_directory>"
+.\.venv\Scripts\python -m so101_sim.data add "local-artifacts/runs/experiments/<run_directory>"
 ```
 
-The command accepts only direct run directories under `runs/experiments/`. The run must have valid finalized provenance: a `finished_utc` value and status `completed`, `trial_completed`, `failed`, or `interrupted`. Nested evaluation records must also be finalized. A process killed before finalization can leave a running record that cannot be saved through this command. Custom outputs, legacy directories, and individual checkpoint files are outside this command's scope.
+The command accepts only direct run directories under `local-artifacts/runs/experiments/`. The run must have valid finalized provenance: a `finished_utc` value and status `completed`, `trial_completed`, `failed`, or `interrupted`. Nested evaluation records must also be finalized. A process killed before finalization can leave a running record that cannot be saved through this command. Custom outputs, legacy directories, and individual checkpoint files are outside this command's scope.
 
 The command holds the existing output writer lock while it validates and saves the run. Training, evaluation, and catalog writers must have exited. It also rejects links and junctions, preventing a run directory from pulling in files elsewhere.
 
-Saving creates `runs/experiments/<run_directory>.dvc` beside the run and adds the referenced content to `.dvc/cache/`. The original run stays at its existing path. The wrapper uses `dvc add --no-relink`, which avoids recreating workspace links from the cache; see the official [DVC add reference](https://doc.dvc.org/command-reference/add).
+Saving creates `local-artifacts/runs/experiments/<run_directory>.dvc` beside the run and adds the referenced content to `.dvc/cache/`. The original run stays at its existing path. The wrapper uses `dvc add --no-relink`, which avoids recreating workspace links from the cache; see the official [DVC add reference](https://doc.dvc.org/command-reference/add).
 
 ## Inspect the saved snapshot
 
 ```powershell
-dvc status "runs/experiments/<run_directory>.dvc"
+dvc status "local-artifacts/runs/experiments/<run_directory>.dvc"
 ```
 
 This compares the current files with the saved pointer. Run it after writers have stopped. Adding a standalone evaluation after saving changes the directory and can make its status modified. The wrapper refuses an existing `.dvc` pointer so it cannot replace the earlier snapshot. Finish evaluations before saving, and let the next training invocation create a new run directory for the next snapshot.
@@ -48,8 +48,8 @@ DVC runtime state uses the Git-ignored `.dvc/site-cache/` directory inside this 
 
 | Location | Keep for |
 | --- | --- |
-| `runs/experiments/<run_directory>/` | Original experiment files in their existing location. |
-| `runs/experiments/<run_directory>.dvc` | Pointer identifying the saved directory content. |
+| `local-artifacts/runs/experiments/<run_directory>/` | Original experiment files in their existing location. |
+| `local-artifacts/runs/experiments/<run_directory>.dvc` | Pointer identifying the saved directory content. |
 | `.dvc/cache/` | Cached content needed to recover the snapshot. |
 
 Both the `.dvc` pointers and their referenced cache content are needed for recovery. A Git checkout alone contains neither. Keep them together in a private backup; a cache on the same disk does not protect against losing that disk. Restore into a separate working copy before using recovered files with existing historical records.
@@ -62,7 +62,7 @@ To use a private backup disk later, choose its actual path and configure it loca
 
 ```powershell
 dvc remote add --local -d backup 'E:\SO101-DVC'
-dvc push "runs/experiments/<run_directory>.dvc"
+dvc push "local-artifacts/runs/experiments/<run_directory>.dvc"
 ```
 
 These are separate manual operations. `--local` keeps the location in Git-ignored `.dvc/config.local`; DVC supports a local directory as a remote. See the official [DVC remote add reference](https://doc.dvc.org/command-reference/remote/add). A push copies the referenced content to that location; separately retain the `.dvc` pointers and local configuration in the private backup.

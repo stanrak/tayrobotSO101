@@ -316,7 +316,7 @@ def main() -> None:
     from .outputs import RUNS_ROOT, OutputError, _writer_lock
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=RUNS_ROOT, help="Experiment root (default: runs).")
+    parser.add_argument("--root", type=Path, default=RUNS_ROOT, help="Experiment root (default: local-artifacts/runs).")
     args = parser.parse_args()
     try:
         with _writer_lock(args.root / ".current.lock"):

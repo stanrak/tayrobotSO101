@@ -4,26 +4,28 @@ Read the [instruction index](instruction.md), [training contract](training.md), 
 
 ## Isolated output directories
 
-- Each trial or full-training invocation automatically creates a unique `runs/experiments/<UTC timestamp>_<mode>_seed<seed>_<unique suffix>/` directory.
+- Each trial or full-training invocation automatically creates a unique `local-artifacts/runs/experiments/<UTC timestamp>_<mode>_seed<seed>_<unique suffix>/` directory.
 - Omit `--output` for ordinary commands. A custom training output must be empty.
-- Never reuse, move, or delete older experiment directories. Preserve `runs/current`, `runs/history`, and other legacy records at their original paths and bytes.
+- Never reuse, move, or delete older experiment directories during ordinary operations. The user-authorized storage consolidation places data under `local-artifacts/` only; root `runs`, `reports`, and `checkpoints` aliases and historical GIF links in root `docs/` have been removed. Preserve historical bytes and DVC sidecars; any future migration requires explicit user direction and before/after hash verification.
+- Preserve old path strings inside immutable historical records. Resolve their archived locations through the local `local-artifacts/migration-manifest.json` mapping rather than rewriting records or recreating root aliases.
+- Keep active root `docs/` reader documentation and `tests/` test sources in place. They are project files, not duplicate historical storage.
 - Each standalone evaluation has its own `evaluations/<evaluation_id>/` record beside the checkpoint. Do not overwrite previous reports or custom output files.
-- Respect output writer locks, including `runs/.current.lock` for compatibility with older active processes. Do not delete or bypass locks, or mutate an active run.
+- Respect output writer locks, including `local-artifacts/runs/.current.lock`. Do not delete or bypass locks, or mutate an active run.
 
 ## Provenance and checkpoints
 
 - Record `run.json` provenance: command, seed, timestamps/status, Python/platform/package versions, Git revision/dirty state, and source hashes.
 - Retain an exact allowlisted source/config snapshot alongside training settings, environment signatures, checkpoints, metrics, actual transitions, and actual optimizer counts.
-- Keep snapshot selection explicit. Include relevant agent-maintained instructions when reorganizing their paths and retain existing allowlisted sources. Never add `reports/`, other result directories, private files, credentials, arbitrary repository content, or otherwise unapproved user-owned guidance to snapshots.
+- Keep snapshot selection explicit. Include relevant agent-maintained instructions when reorganizing their paths and retain existing allowlisted sources. Never add `local-artifacts/reports/`, other result directories, private files, credentials, arbitrary repository content, or otherwise unapproved user-owned guidance to snapshots.
 - Preserve partial, failed, and interrupted runs accurately. Do not report planned counts as observed counts.
 - Do not automatically load policies or migrate historical checkpoints. Keep existing asset, environment-signature, package-version, and checkpoint-integrity checks.
 - An explicit full-training `--resume` may restore a compatible checkpoint under the [training continuation contract](training.md). Always create a new output record and keep parent files unchanged; record parent checkpoint path, SHA256, run identifier, and starting counters.
 - Preserve session and cumulative counts separately. Top-level actual transition/optimizer/update/epoch counts remain session values; `cumulative_*` includes the selected parent baseline. Do not derive a lineage by summing independent runs or filling missing legacy measurements.
-- `runs/latest.json` is an atomic convenience pointer to the latest managed training run. Default checkpoint lookup follows it; fall back to legacy `runs/current` only when the pointer is absent. Invalid pointers must fail clearly.
+- `local-artifacts/runs/latest.json` is an atomic convenience pointer to the latest managed training run. Default checkpoint lookup follows it; fall back to legacy `local-artifacts/runs/current` only when the pointer is absent. Invalid pointers must fail clearly.
 
 ## Saved-data comparisons
 
-- Maintain the derived `runs/index.csv` catalog from saved metadata, including legacy runs. `python -m so101_sim.experiments` rebuilds it without loading or rolling out policies.
+- Maintain the derived `local-artifacts/runs/index.csv` catalog from saved metadata, including legacy runs. `python -m so101_sim.experiments` rebuilds it without loading or rolling out policies.
 - Label held-out, validation, and standalone evaluation metrics separately. Leave unmeasured fields blank.
 - Never assign learned task-performance scores to a startup diagnostic or rank it as a trained policy.
 - Compare matching task/environment signatures, evaluation seeds, and budgets. Retain checkpoint identities/hashes, reward scale, backend, learning settings, optimizer counts, and timing scopes needed to interpret a comparison.
@@ -35,7 +37,7 @@ Read the [instruction index](instruction.md), [training contract](training.md), 
 ## Git and historical artifacts
 
 - Treat detailed actual-run results as local and confidential, including measured metrics, run identifiers, checkpoint hashes, reviews, plots, timings, and log excerpts.
-- Keep run results out of Git: `reports/`, `runs/`, historical `checkpoints/`, and generated learning GIFs remain ignored.
+- Keep run results out of Git: `local-artifacts/reports/`, `local-artifacts/runs/`, historical `local-artifacts/checkpoints/`, and generated learning GIFs remain ignored.
 - Every new experiment must contain a local ignore marker, including custom output folders.
 - Remove previously tracked result artifacts from the Git index without deleting local bytes. Ordinary runs do not rewrite Git history.
 - Index removal protects future commits; it does not erase prior commits or remote history. Any history purge is a separate reviewed destructive operation under the [workflow](workflow.md) requirements.
@@ -44,8 +46,8 @@ Read the [instruction index](instruction.md), [training contract](training.md), 
 
 ## Local reviews and versioned descriptions
 
-- Write detailed reviews and saved-data comparisons to `reports/training_review_<date>_<run-suffix>/review.md`. The placeholders describe a naming template, not a run to create or evaluate.
-- Preserve raw runs, checkpoints, evaluations, and legacy reports at their original paths and bytes. A review may reference those local artifacts without moving or duplicating them into versioned files.
+- Write detailed reviews and saved-data comparisons to `local-artifacts/reports/training_review_<date>_<run-suffix>/review.md`. The placeholders describe a naming template, not a run to create or evaluate.
+- Preserve raw runs, checkpoints, evaluations, and legacy reports at their canonical archived locations and with unchanged bytes. A review may reference those local artifacts without moving or duplicating them into versioned files; historical references to former paths remain immutable and are located through the migration manifest.
 - Keep `README.md`, `docs/`, source, test fixtures, and commit text free of detailed actual-run outputs and links to confidential artifacts. Versioned descriptions may explain the technical approach, training process, and broad qualitative achievements.
 - Do not include confidential run details in external requests or expand the source snapshot allowlist to include local reviews or result artifacts.
 
@@ -53,7 +55,7 @@ Read the [instruction index](instruction.md), [training contract](training.md), 
 
 - DVC is optional external tooling already installed on the user's machine. Use its executable on `PATH`; do not install it into the simulation environment or alter dependency pins as part of snapshot management.
 - Keep the project configuration detached from Git (`core.no_scm = true`), analytics disabled, and cache type `copy`. Run pointers, cached content, and local remote configuration remain confidential and Git-ignored.
-- Use `python -m so101_sim.data add [latest|runs/experiments/<run_directory>]` for an explicitly requested snapshot. Only finalized direct children of managed `runs/experiments/` are supported. Require terminal provenance with a finish timestamp, validate nested evaluations, reject links/junctions and protected payloads, and hold the existing global output writer lock through validation and the DVC subprocess.
+- Use `python -m so101_sim.data add [latest|local-artifacts/runs/experiments/<run_directory>]` for an explicitly requested snapshot. Only finalized direct children of managed `local-artifacts/runs/experiments/` are supported. Require terminal provenance with a finish timestamp, validate nested evaluations, reject links/junctions and protected payloads, and hold the existing global output writer lock through validation and the DVC subprocess.
 - Preserve run bytes and ignore markers with `dvc add --no-relink`. Refuse an existing run sidecar rather than overwriting its snapshot. Do not bypass validation with a raw add command against historical or active outputs.
 - Snapshot after any desired standalone evaluations finish. Later additions can make DVC status modified; they do not authorize replacing the earlier pointer. Each new training invocation retains its own separate run and pointer.
 - Do not add automatic DVC operations to training or evaluation, create training pipelines, configure a remote, or push content without the corresponding user request. Snapshot implementation and synthetic verification do not authorize caching actual historical runs.

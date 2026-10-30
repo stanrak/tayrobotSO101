@@ -6,13 +6,28 @@ Training, validation, and standalone evaluation have separate records. This make
 
 ## Where results are stored
 
+All local experiment artifacts live under `local-artifacts/`:
+
+| Directory | Contents |
+| --- | --- |
+| `local-artifacts/runs/` | Managed experiments, older runs, latest pointer, comparison index, and per-run DVC sidecars. |
+| `local-artifacts/checkpoints/` | Historical checkpoints from the earlier storage layout. |
+| `local-artifacts/reports/` | Historical reports and detailed local reviews. |
+| `local-artifacts/docs/` | Generated historical rollout GIFs. |
+
+The entire directory is Git-ignored. Use these canonical paths for commands and new records. The former root `runs/`, `reports/`, and `checkpoints/` aliases have been removed. DVC cache and runtime files remain under `.dvc/`.
+
+Historical rollout GIFs exist only under `local-artifacts/docs/`; their former links in root `docs/` have been removed. Root `docs/` contains the active reader documentation and static simulation images. Root `tests/` contains the active test suite. These are project files, separate from historical experiment storage.
+
+Saved historical records remain byte-for-byte unchanged and may contain paths from the former layout. Use the local `local-artifacts/migration-manifest.json` mapping to locate their archived files; do not rewrite those records to update path strings.
+
 Every training or trial invocation creates a directory under:
 
 ```text
-runs/experiments/<UTC timestamp>_<mode>_seed<seed>_<unique suffix>/
+local-artifacts/runs/experiments/<UTC timestamp>_<mode>_seed<seed>_<unique suffix>/
 ```
 
-Omitting `--output` selects this managed layout. A custom training output must be an empty directory. A run starts a fresh policy unless `--resume` explicitly selects a compatible checkpoint. Both modes leave older experiment directories at their original paths.
+Omitting `--output` selects this managed layout. A custom training output must be an empty directory. A run starts a fresh policy unless `--resume` explicitly selects a compatible checkpoint. Both modes preserve older experiment directories in their existing storage locations.
 
 | File or directory | Contents |
 | --- | --- |
@@ -30,11 +45,11 @@ Omitting `--output` selects this managed layout. A custom training output must b
 
 Failed and interrupted runs retain the observed status and counts. An abrupt process kill can leave a previously recorded running status with partial logs. Missing evaluation metrics mean they were not measured, rather than zero performance.
 
-`runs/latest.json` is an atomic convenience pointer to the most recently started managed training run. It is not the best run across all history. The latest run's checkpoint lookup tries `best_model.zip`, then `trial_model.zip`, then `final_model.zip`. When the pointer is absent, lookup falls back to legacy `runs/current/`; an invalid pointer fails clearly. A recent failed run without a checkpoint can therefore require an explicit checkpoint path. See [recovery after a logging failure](training.md#recover-after-a-logging-failure) for selecting the saved parent checkpoint.
+`local-artifacts/runs/latest.json` is an atomic convenience pointer to the most recently started managed training run. It is not the best run across all history. The latest run's checkpoint lookup tries `best_model.zip`, then `trial_model.zip`, then `final_model.zip`. When the pointer is absent, lookup falls back to legacy `local-artifacts/runs/current/`; an invalid pointer fails clearly. A recent failed run without a checkpoint can therefore require an explicit checkpoint path. See [recovery after a logging failure](training.md#recover-after-a-logging-failure) for selecting the saved parent checkpoint.
 
 ## Continued-training lineage and counts
 
-`--resume CHECKPOINT` continues optimization from a checked full-training checkpoint. `--resume latest` resolves the existing pointer and checkpoint selection before the new run updates `runs/latest.json`. Because selection prefers `best_model.zip`, the starting count belongs to that selected checkpoint and can be earlier than the parent's final count. An explicit `final_model.zip` path selects the latest saved training state in that parent run instead.
+`--resume CHECKPOINT` continues optimization from a checked full-training checkpoint. `--resume latest` resolves the existing pointer and checkpoint selection before the new run updates `local-artifacts/runs/latest.json`. Because selection prefers `best_model.zip`, the starting count belongs to that selected checkpoint and can be earlier than the parent's final count. An explicit `final_model.zip` path selects the latest saved training state in that parent run instead.
 
 The parent checkpoint's bytes and metadata are retained. Continuation creates a new output directory and records:
 
@@ -57,7 +72,7 @@ A resumed run writes `parent_comparison.json` separately from its own checkpoint
 
 The nested `parent.status` identifies an `available` or `unavailable` baseline. The overall `status` is `pending` until the child has a completed validation, then `better`, `equal`, or `worse`; a missing or mismatched baseline produces `unavailable` with a `reason`. For example, a selected final checkpoint from an interrupted run may have no validation tied to that exact saved state; the parent's best-validation score then cannot stand in for it. Even identical policy weights in different ZIP archives do not establish an exact hash match. Different validation seeds or episode budgets also prevent comparison. Missing evidence does not imply that the parent or child performed poorly.
 
-The comparison uses the same ranking as child checkpoint selection: higher success rate, then lower mean final distance, then higher raw return. `recommendation` names the child for a better score and the parent for an equal or worse score; it is unavailable before a valid comparison. This compares reused validation data and does not provide a new held-out result or statistical proof of improvement. The first completed child validation still creates `best_model.zip`, and later improvements replace it within the child run. Held-out evaluation continues to use the child's best checkpoint. A weaker child receives an explicit comparison result; it does not trigger a rollback, copy the parent checkpoint, or change `runs/latest.json` from the newest run to a stronger older run.
+The comparison uses the same ranking as child checkpoint selection: higher success rate, then lower mean final distance, then higher raw return. `recommendation` names the child for a better score and the parent for an equal or worse score; it is unavailable before a valid comparison. This compares reused validation data and does not provide a new held-out result or statistical proof of improvement. The first completed child validation still creates `best_model.zip`, and later improvements replace it within the child run. Held-out evaluation continues to use the child's best checkpoint. A weaker child receives an explicit comparison result; it does not trigger a rollback, copy the parent checkpoint, or change `local-artifacts/runs/latest.json` from the newest run to a stronger older run.
 
 After each child validation, the terminal prints `Session-best validation versus selected parent` with the comparison status and recommendation. Here `better` and `worse` describe the child's session best relative to the selected parent, rather than the latest validation relative to the child's previous round. The JSON file retains the availability reason, both scores, and child-best checkpoint identity/counters for later inspection.
 
@@ -112,11 +127,11 @@ Reports identify the checkpoint by path and SHA256. Existing reports are retaine
 .\.venv\Scripts\python -m so101_sim.experiments
 ```
 
-This rebuilds `runs/index.csv` from saved metadata and reports. It does not load a policy or generate new task measurements. The derived table includes legacy and managed runs, learning settings, reward scale, backend, source/environment fingerprints, parent lineage, session/cumulative counts, budgets, phase timings, and measured metrics. Each evaluation row identifies its kind, checkpoint hash, and seeds.
+This rebuilds `local-artifacts/runs/index.csv` from saved metadata and reports. It does not load a policy or generate new task measurements. The derived table includes legacy and managed runs, learning settings, reward scale, backend, source/environment fingerprints, parent lineage, session/cumulative counts, budgets, phase timings, and measured metrics. Each evaluation row identifies its kind, checkpoint hash, and seeds.
 
 Compare matching task/environment signatures and evaluation seeds at comparable budgets. Validation, held-out, and standalone results are labeled separately. Startup diagnostics have blank task-performance metrics. A result from an older task version cannot serve as a directly comparable success-rate baseline for the physical ball task.
 
-Custom training outputs outside `runs/` are outside the default catalog. To compare directories under another parent, use:
+Custom training outputs outside `local-artifacts/runs/` are outside the default catalog. To compare directories under another parent, use:
 
 ```powershell
 .\.venv\Scripts\python -m so101_sim.experiments --root <parent>
@@ -126,9 +141,9 @@ Replace `<parent>` with the actual path before running the command.
 
 ## Concurrent access and historical files
 
-Writer locks protect training, standalone evaluation, and catalog rebuilding from concurrent modification. The existing `runs/.current.lock` name remains compatible with older processes. The operating system releases the lock after the writer exits, including after a crash; deleting the lock file is not a way to safely unlock an active process.
+Writer locks protect training, standalone evaluation, and catalog rebuilding from concurrent modification. The shared output lock is `local-artifacts/runs/.current.lock`. The operating system releases the lock after the writer exits, including after a crash; deleting the lock file is not a way to safely unlock an active process.
 
-Existing `runs/current/`, `runs/history/`, `checkpoints/`, and `reports/` records remain historical local artifacts. Run outputs, generated learning GIFs, detailed reviews, and their measurements are confidential local artifacts excluded from Git tracking. Detailed reviews belong under `reports/`; public documentation keeps only general technical descriptions, process, and broad progress. New experiment folders include a local ignore marker, including custom output folders. A clean checkout may therefore have no trained checkpoint or historical report. Static simulation images can remain part of the documentation.
+Existing `local-artifacts/runs/current/`, `local-artifacts/runs/history/`, `local-artifacts/checkpoints/`, and `local-artifacts/reports/` records remain historical local artifacts. Run outputs, generated learning GIFs, detailed reviews, and their measurements are confidential local artifacts excluded from Git tracking. Detailed reviews belong under `local-artifacts/reports/`; public documentation keeps only general technical descriptions, process, and broad progress. New experiment folders include a local ignore marker, including custom output folders. A clean checkout may therefore have no trained checkpoint or historical report. Static simulation images can remain part of the documentation.
 
 ## Save a finalized run with DVC
 

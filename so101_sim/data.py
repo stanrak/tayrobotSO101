@@ -60,7 +60,7 @@ def _target(requested: str) -> Path:
     path = Path(os.path.abspath(path))
     root = ROOT.resolve()
     if not path.is_relative_to(root):
-        raise outputs.OutputError("Select a managed run inside runs/experiments.")
+        raise outputs.OutputError("Select a managed run inside local-artifacts/runs/experiments.")
     current = root
     for part in path.relative_to(root).parts:
         current = current / part
@@ -68,7 +68,7 @@ def _target(requested: str) -> Path:
     resolved = path.resolve()
     managed = (outputs.RUNS_ROOT / "experiments").resolve()
     if resolved.parent != managed or not resolved.is_dir():
-        raise outputs.OutputError("Only direct run directories in runs/experiments are supported.")
+        raise outputs.OutputError("Only direct run directories in local-artifacts/runs/experiments are supported.")
     return resolved
 
 
@@ -150,7 +150,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     add = commands.add_parser("add", help="Save one finalized run to the local DVC cache.")
-    add.add_argument("run", nargs="?", default="latest", help="latest or runs/experiments/<run_directory>.")
+    add.add_argument("run", nargs="?", default="latest", help="latest or local-artifacts/runs/experiments/<run_directory>.")
     args = parser.parse_args()
     try:
         manifest = add_run(args.run)
