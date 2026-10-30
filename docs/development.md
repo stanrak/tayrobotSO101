@@ -12,6 +12,7 @@ The project separates manual interaction, the physical learning environment, tra
 | [`so101_sim/__main__.py`](../so101_sim/__main__.py) | Startup dependency checks and the default manual application. |
 | [`so101_sim/teleop.py`](../so101_sim/teleop.py) | Laptop keyboard controls, pause/reset, camera, and viewer state. |
 | [`so101_sim/env.py`](../so101_sim/env.py) | Physical workspace, reachable ball sampling, observations/actions/reward, success, and reset cadence. |
+| [`so101_sim/grasp.py`](../so101_sim/grasp.py) | Six-joint grasp/lift/hold task, physical jaw contacts and sustained pinning failure. |
 | [`so101_sim/train.py`](../so101_sim/train.py) | Continuous/bounded PPO training, single-update trials, fixed-seed validation, checkpoints, and CLI settings. |
 | [`so101_sim/learning.py`](../so101_sim/learning.py) | Training-only reward scaling and PPO diagnostics from already collected data. |
 | [`so101_sim/diagnostics.py`](../so101_sim/diagnostics.py) | Bounded-memory signed action, observed control/tracking, and near-goal summaries without extra simulation or action sampling. |

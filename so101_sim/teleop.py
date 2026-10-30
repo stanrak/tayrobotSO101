@@ -119,6 +119,8 @@ def run(*, seconds: float | None = None) -> None:
         )
         target = np.clip(env.home.copy(), limits[:, 0], limits[:, 1])
         control = env.data.ctrl.copy()
+        target_physics_steps = 0
+        target_physics_budget = env.target_min_steps * env.frame_skip
         print("SO-101 keyboard control (simulation only).", flush=True)
         print("Focus the MuJoCo viewer, then press keys (+ / -):", flush=True)
         for pair, name in zip(JOINT_KEY_PAIRS, names, strict=True):
@@ -127,6 +129,7 @@ def run(*, seconds: float | None = None) -> None:
             "Press repeatedly: each press changes its target by 2 degrees.\n"
             "Holding a key does not repeat commands; command speed <= 0.8 rad/s.\n"
             "Backspace: home targets | N: new reachable ball | Space: pause/resume | Esc: quit\n"
+            f"New target and home reset every {target_physics_budget * env.model.opt.timestep:g} simulated seconds.\n"
             "Joint commands typed while paused take effect after resuming.\n"
             "MuJoCo also receives these keys; some letters toggle rendering options,\n"
             "and Esc selects the free camera before exiting. Tab toggles its UI.\n"
@@ -173,6 +176,7 @@ def run(*, seconds: float | None = None) -> None:
                             env.reset(options={"new_target": True})
                             target = np.clip(env.home.copy(), limits[:, 0], limits[:, 1])
                             control = env.data.ctrl.copy()
+                            target_physics_steps = 0
                             print("New reachable ball; robot reset to home.", flush=True)
                             _print_targets(names, target)
                         elif command.kind == "home":
@@ -191,6 +195,14 @@ def run(*, seconds: float | None = None) -> None:
                         control = slew_limited_control(control, target, limits, timestep)
                         env.data.ctrl[:] = control
                         mujoco.mj_step(env.model, env.data)
+                        target_physics_steps += 1
+                        if target_physics_steps >= target_physics_budget:
+                            env.reset(options={"new_target": True})
+                            target = np.clip(env.home.copy(), limits[:, 0], limits[:, 1])
+                            control = env.data.ctrl.copy()
+                            target_physics_steps = 0
+                            print("New reachable ball; robot reset to home.", flush=True)
+                            _print_targets(names, target)
                 if now >= next_render:
                     _sync_keyboard_view(viewer, env.model, env.data, viewer_state)
                     next_render = now + 1.0 / 60.0

@@ -60,7 +60,7 @@ The viewer also has its own camera and rendering controls. Some letter keys can 
 
 The application owns the simulation state, so native viewer resets, joint/control sliders, and mouse physics edits are ignored. Use the keyboard commands above to change the robot or choose another ball position.
 
-The ball can move when touched and can fall off the desk. Manual mode keeps the current ball until you press N; it does not automatically choose another target. The launcher starts keyboard control without loading a policy or starting a learning run. See [The environment](environment.md) for the physical behavior and task definition.
+The ball can move when touched and can fall off the desk. Manual mode selects a new reachable spawn every 300 simulated seconds and resets the robot to exact home. Pause stops that timer; N selects a new target immediately and restarts it. The launcher starts keyboard control without loading a policy or starting a learning run. See [The environment](environment.md) for the physical behavior and task definition.
 
 ## Prepare dependencies when needed
 

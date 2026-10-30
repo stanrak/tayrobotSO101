@@ -4,6 +4,8 @@
 
 The trainer uses PPO with a small multilayer perceptron on the CPU. Manual keyboard control is a separate application: starting the simulator does not start training or load a policy. All commands below run from the repository root in PowerShell, using the prepared project environment described in [Getting started](getting-started.md).
 
+The default task is [stage-one grasp, lift and hold](grasping.md), using six actuator actions. It requires a fresh compatible checkpoint; earlier three-joint reach checkpoints cannot be resumed into it. Each target is reused for 300 simulated seconds across retries, with exact-home resets. Implementing this task does not establish learned grasp performance.
+
 ## Choose a run mode
 
 | Mode | Command | Result |
@@ -75,7 +77,7 @@ After final validation, the trainer saves `final_model.zip` and evaluates the se
 | `--viewer-speed` | `1.0` | Positive display speed multiplier when using the viewer. |
 | `--output` | New managed directory | Optional custom empty training directory. |
 
-Additional PPO settings are recorded in each run's `training.json`: batch size 256, discount factor 0.99, GAE lambda 0.95, clip range 0.2, entropy coefficient 0, value coefficient 0.5, gradient norm limit 0.5, and two 64-unit hidden layers. The trainer uses one PyTorch thread and deterministic algorithms. Observations have manual scaling described in [Environment](environment.md); running observation/reward normalization is disabled.
+Additional PPO settings are recorded in each run's `training.json`: batch size 256, discount factor 0.99, GAE lambda 0.95, clip range 0.2, entropy coefficient 0, value coefficient 0.5, gradient norm limit 0.5, and two 64-unit hidden layers. The trainer uses one PyTorch thread and deterministic algorithms. Observations have manual scaling described in [Environment](environment.md) and [Grasping](grasping.md); running observation/reward normalization is disabled.
 
 ## Reward scale and controlled comparisons
 
@@ -119,11 +121,11 @@ These are alternative flag sets, not standalone commands. Process communication 
 | `rollout/mean_distance_m`, `rollout/minimum_distance_m`, `rollout/within_*mm_fraction` | Approach accuracy across the collected rollout. |
 | `rollout/maximum_hold_steps` | Progress toward sustained success. |
 
-In the table, `{j}` is 0 for shoulder pan, 1 for shoulder lift, and 2 for elbow flex. Short names within a cell share the prefix of its first key. Aggregate `*` suffixes include `mean`, `min`, and `max`; observed-control moments also include `abs_mean` and `abs_max`. Exceedance means include zero for in-bound samples, so their denominator is all corresponding rollout actions or sampled actor means, rather than only violations. Empty conditional speed groups omit their moments and retain a zero sample count.
+In the table, `{j}` is 0 for shoulder pan, 1 for shoulder lift, and 2 for elbow flex. Short names within a cell share the prefix of its first key. Aggregate `*` suffixes include `mean`, `min`, and `max`; observed-control moments also include `abs_mean` and `abs_max`. Exceedance means include zero for in-bound samples, so their denominator is all corresponding rollout actions or sampled actor means, rather than only violations. Empty conditional speed groups omit their moments and retain a zero sample count. Generic action indices now also include wrist flex (3), wrist roll (4), and gripper (5); reach-only control metrics remain limited to indices 0-2.
 
 The action diagnostics distinguish the raw stochastic actions stored during rollout from the actor means inspected after the PPO update. The sampled means describe the updated actor on a bounded sample of existing observations; they are not the means that produced every collected action. Lower and upper bound violations are reported separately. Action values use normalized action coordinates, while reconstructed joint positions, control targets, tracking errors, and slew use physical radians.
 
-Control diagnostics reconstruct the three controlled joint positions, velocities, and actual control targets from the existing 15-component observation. They compare the clipped requested target with the previous control target to measure the fraction requiring the controller's speed limit, and separately measure the observed control change. `slew_limit_fraction` counts demand above the control-period speed budget with a small reconstruction tolerance; `observed_slew_limit_fraction` counts observed target movement reaching that budget within tolerance. These are observation-derived target-budget measurements at control-step boundaries. They do not measure motor-force saturation or every internal physics substep. Tracking error is the signed control target minus joint position. A nonzero error or boundary fraction is evidence to investigate, rather than proof that gravity, clipping, or a particular learning mechanism caused failure.
+The retained reach-task control diagnostics reconstruct three controlled joint positions, velocities, and actual control targets from its 15-component observation. This decoder is disabled for the new grasp layout; generic PPO action/critic diagnostics still apply to all six actions. They compare the clipped requested target with the previous control target to measure the fraction requiring the controller's speed limit, and separately measure the observed control change. `slew_limit_fraction` counts demand above the control-period speed budget with a small reconstruction tolerance; `observed_slew_limit_fraction` counts observed target movement reaching that budget within tolerance. These are observation-derived target-budget measurements at control-step boundaries. They do not measure motor-force saturation or every internal physics substep. Tracking error is the signed control target minus joint position. A nonzero error or boundary fraction is evidence to investigate, rather than proof that gravity, clipping, or a particular learning mechanism caused failure.
 
 Near-goal summaries pair distance with joint speed, ball speed, goal entry, and hold progress. They distinguish reaching the 15 mm region from meeting the low-speed hold condition. `eligible_hold_samples` measures distance below 15 mm and joint-speed norm below 0.3 rad/s; it does not apply collision filtering, count a hold streak, or establish task success. `goal_entry_samples` counts outside-to-inside transitions, so one episode can contribute several entries. On an ending episode, diagnostics use its terminal observation and do not connect it to the next episode's reset pose. Missing terminal observations are counted rather than replaced by reset data. Ball-speed moments use only samples with valid ball-velocity info, counted by `control_ball_speed_samples`. Rollout summaries describe only the observed transitions in that rollout; sparse progress rows are not exhaustive lifetime measurements.
 
@@ -147,7 +149,7 @@ These durations overlap: periodic validation is inside rollout timing, while fin
 
 Passive control aggregation runs in the rollout callback and is included in rollout time. The `diagnostics` phase above measures the sampled actor/critic checks after optimization. These diagnostics preserve the observation/action interface, physical controller, reward, PPO settings, and checkpoint compatibility; they do not establish a learning improvement.
 
-SAC, `VecNormalize`, observation extensions, and reward shaping are possible future experiments rather than enabled options. The current implementation and diagnostic results do not establish that any of them improves this task.
+SAC, `VecNormalize`, and further changes to observations or reward shaping are possible future experiments rather than enabled options. The new grasp task has its own explicit contact/velocity observation and reward contract. The current implementation and diagnostic results do not establish that any of them improves this task.
 
 ## Recover after a logging failure
 

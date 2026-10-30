@@ -2,7 +2,7 @@
 
 [Project overview](../README.md) · [Documentation index](README.md)
 
-The current task, `SO101ReachableSurfaceBall-v3`, asks a desk-mounted SO-101 to reach a physical ball and remain close to it at low joint speed. The scene combines the pinned upstream robot with a desk and a freely moving ball. Its implementation is in [so101_sim/env.py](../so101_sim/env.py).
+The default learning task is now stage-one grasp, lift and hold, implemented in [so101_sim/grasp.py](../so101_sim/grasp.py). It controls all six joints and requires physical contact on both jaws with the ball clear of the desk. See [Grasping](grasping.md) for its interface and failure rules. The shared physical workspace and retained three-joint reach task, `SO101ReachableSurfaceBall-v4`, are implemented in [so101_sim/env.py](../so101_sim/env.py).
 
 ## Desk and robot placement
 
@@ -49,17 +49,17 @@ Default resets place the ball on the tabletop at a position checked to be within
 3. Accept only a candidate within 14 mm of that end-effector and with all checked contacts nonpenetrating to a numerical tolerance of 1 µm.
 4. Keep at least 40 mm between the ball and the robot's initial end-effector position, and at least 20 mm between consecutive automatically or manually selected targets.
 
-This is a reachability check, not a robot controller. The actual arm starts at its home pose with small joint jitter. The generating FK angles do not enter policy observations, reported information, or actions. The policy still has to discover how to reach the ball.
+This is a reachability check, not a robot controller. The actual arm starts at its exact six-joint home pose with zero velocity. The generating FK angles do not enter policy observations, reported information, or actions. The policy still has to discover how to reach the ball.
 
 Accepted positions typically lie near x = 0.24…0.26 m and y = ±0.075 m. Acceptance comes from the FK and contact checks, rather than an arbitrary floating target box. An explicitly seeded reset reproduces its target independently of the previous one.
 
 ## Target duration and resets
 
-Each learning target receives **1,200 control steps per environment**, equivalent to 60 simulated seconds. A single attempt also has a maximum of 1,200 steps. The two counters have different roles:
+Each learning target receives **6,000 control steps per environment**, equivalent to **300 simulated seconds (five minutes)**. A single attempt still has a maximum of 1,200 steps (60 simulated seconds). The two counters have different roles:
 
 | Event | Robot and ball reset | Target budget |
 | --- | --- | --- |
-| Success or collision before the target budget ends | Robot returns home; ball returns to the same spawn | Retains cumulative exposure to that target |
+| Success or failure before the target budget ends | Robot returns home; ball returns to the same spawn | Retains cumulative exposure to that target |
 | Cumulative target boundary | Current attempt is truncated | Next automatic reset samples another reachable target |
 | Explicit seeded reset | Starts a fresh, reproducible target | Starts again at zero |
 | Explicit `new_target=True` | Selects another target | Starts again at zero |
@@ -75,11 +75,11 @@ env.reset()  # Retry the same spawn while its cumulative budget remains.
 env.reset(options={"new_target": True})  # Explicitly select another target.
 ```
 
-Manual mode does not automatically resample the ball. Its N key provides the explicit target change. [Training](training.md) explains the separate total training budget, which counts transitions across all environments.
+Manual mode also selects a new target after 300 seconds of actual physics stepping and resets every joint and command to exact home. Pausing does not advance that budget. Its N key overrides the timer and starts a fresh target budget. The ball stays a free physical body: keeping a target means reusing its spawn during retries, rather than freezing it against robot contact. [Training](training.md) explains the separate total training budget, which counts transitions across all environments.
 
-## Actions and observations
+## Retained reach-task actions and observations
 
-Manual keyboard control can move all six robot joints. The learning policy controls only the first three; wrist flex, wrist roll, and gripper targets retain their home values.
+Manual keyboard control can move all six robot joints. The retained reach policy controls only the first three; wrist flex, wrist roll, and gripper targets retain their home values.
 
 | Policy joint | Minimum requested angle | Maximum requested angle |
 | --- | ---: | ---: |
@@ -87,7 +87,7 @@ Manual keyboard control can move all six robot joints. The learning policy contr
 | Shoulder lift | −1.15 rad | −0.45 rad |
 | Elbow flex | 0.8 rad | 1.6 rad |
 
-The three action components lie in `[-1, 1]` and map to absolute joint-position targets in these ranges. Requested positions slew at no more than 0.8 rad/s at the physics rate while retaining the actuator dynamics. The six-joint home pose is `[0, -0.8, 1.2, -0.4, 0, 0.5]` rad; resets add up to ±0.04 rad jitter to the first three joints.
+The three action components lie in `[-1, 1]` and map to absolute joint-position targets in these ranges. Requested positions slew at no more than 0.8 rad/s at the physics rate while retaining the actuator dynamics. The six-joint home pose is `[0, -0.8, 1.2, -0.4, 0, 0.5]` rad; resets restore it exactly, clear velocities and match all six actuator commands.
 
 The policy receives 15 `float32` values:
 
@@ -99,9 +99,9 @@ The policy receives 15 `float32` values:
 | Current ball center | 3 | Multiplied by 3 |
 | Ball center minus end-effector position | 3 | Multiplied by 5 |
 
-These are fixed feature scales. The current input does not include ball velocity, hold progress, or target time remaining, although diagnostic information exposes some of those quantities. Such inputs are possible future experiments rather than features enabled in the current policy.
+These are fixed feature scales. The current input does not include ball velocity, hold progress, or target time remaining, although diagnostic information exposes some of those quantities. The default grasp task uses a different observation including contact, ball velocity and hold/pin progress; these layouts are not interchangeable.
 
-## Success, failure, and reward
+## Retained reach-task success, failure, and reward
 
 Success requires the `gripperframe` site to remain within **15 mm** of the current ball center, with the norm of the first three joint velocities below **0.3 rad/s**, for **10 consecutive control steps**. At 20 Hz this is a 0.5-second stable hold. Reaching the distance threshold briefly is therefore insufficient.
 

@@ -50,7 +50,7 @@ class _Moments:
 
 
 class RolloutControlDiagnostics:
-    """Decode only the known v3 raw 15D layout, without accessing an environment.
+    """Decode only the known reach-task raw 15D layout, without accessing an environment.
 
     ``actions`` are the collector's existing policy actions and
     ``executed_actions`` its existing clipped actions. Position/velocity metrics
@@ -71,7 +71,7 @@ class RolloutControlDiagnostics:
             hold_speed = float(task["maximum_hold_joint_speed_rad_s"])
             distance = float(task["success_distance_m"])
             self.enabled = bool(
-                task["task"] == "SO101ReachableSurfaceBall-v3"
+                task["task"] in ("SO101ReachableSurfaceBall-v3", "SO101ReachableSurfaceBall-v4")
                 and task["observation_version"] == 2
                 and task["observation"] == _OBSERVATION_LAYOUT
                 and signature["observation_shape"] == [15]

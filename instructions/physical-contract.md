@@ -32,8 +32,9 @@ These are nominal, uncalibrated material parameters. Do not claim an exact real-
 
 ## Target and attempt cadence
 
-- Each target receives 1200 actual control steps per environment, equivalent to 60 simulated seconds at 20 Hz, across unseeded automatic resets and PPO rollouts.
-- Early success/collision resets restore the same spawn and retain the cumulative target count.
+- Each target receives 6000 actual control steps per environment, equivalent to 300 simulated seconds (five minutes) at 20 Hz, across unseeded automatic resets and PPO rollouts.
+- Early success/failure resets restore the same spawn and retain the cumulative target count. Every reset restores all six robot joints and actuator commands to exact home with zero velocity; no reset jitter.
+- Manual mode counts actual physics steps for the same five-minute interval; pause consumes no time. Automatic expiry and N both discard stale keyboard targets/controls and reset the arm.
 - Truncate at the cumulative target boundary; resample on the following reset. Each attempt also has its own 1200-step limit.
 - Seeded reset starts a fresh reproducible target. `options={"new_target": True}` and manual N explicitly override the dwell.
 - Target and attempt budgets do not authorize training or guarantee learning. They are distinct from total trainer transitions and the startup trial's one-update limit.
@@ -44,5 +45,15 @@ These are nominal, uncalibrated material parameters. Do not claim an exact real-
 - Robot self-contact and contact with the table/floor fail on penetration deeper than 4 mm.
 - Keep the six robot joints/actuators separate from the ball's seven qpos and six qvel coordinates.
 - Preserve geometry, physics, reachable placement, target cadence, contact filtering, and live goal tracking under their physical contract tests.
-- Task `SO101ReachableSurfaceBall-v3` and checkpoint environment signatures identify the changed surface-ball semantics. Historical checkpoints remain incompatible; do not migrate them automatically.
+- Retained reach task `SO101ReachableSurfaceBall-v4` and checkpoint environment signatures identify the changed surface-ball semantics. Historical checkpoints remain incompatible; do not migrate them automatically.
 - Further object/dynamics changes require a user request authorizing those specific changes.
+
+## Stage-one grasp/lift/hold contract
+
+- The user's 30 October 2026 request authorizes an actual clamp/lift/hold task and five simulated minutes per target. Default training, validation and checkpoint evaluation use `SO101BallGraspLiftHold-v1` in `so101_sim/grasp.py`; manual mode retains the shared workspace without policy actions.
+- Six policy actions control the existing six actuators. Preserve their pinned ranges, geometry, dynamics and slew limit; add no IK/scripted controller, automatic closure, grasp attachment or teacher actions.
+- Grasp observations are a distinct 39D state interface; retained reach observations remain 15D. Never decode a grasp observation with the reach-only diagnostics or auto-migrate old checkpoints. Signatures include both grasp and shared environment source hashes.
+- Success requires opposed force-bearing actual jaw pads, ball bottom >=20mm clear of tabletop with no static support, low ball/relative/joint speed and ten consecutive control samples. Contact with jaw housings/camera bodies, proximity, tabletop pressing or tossing is not grasp success.
+- Sample supported downward pinning at every physics substep. Sustained >=1N downward robot force, support excess >=0.5N and low ball speed for 0.3 s ends the attempt. Keep brief clamp contacts available. Distinguish pinning, lost ball, numerical state and geometric collision; do not provide escape control actions.
+- These initial engineering thresholds define task behavior, not calibrated hardware/material limits or proof of learned success. Scratch reach sampling certifies approach proximity only, not a full grasp trajectory. Test detectors with synthetic states/real contact fixtures; do not substitute fixture placement for learned acquisition.
+- Camera feasibility inspection does not authorize camera observations, task tracking, new physical hardware access or long training. Keep measured camera/review evidence in the user-requested local report.

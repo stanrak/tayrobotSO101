@@ -18,7 +18,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 import torch
 
-from .env import SO101ReachEnv
+from .grasp import SO101GraspEnv
 from .diagnostics import RolloutControlDiagnostics
 from .evaluate import environment_signature, evaluate_checkpoint, run_episodes, save_checkpoint, write_json
 from .learning import DiagnosticPPO as PPO, RewardScale
@@ -153,6 +153,13 @@ class FixedSeedEvaluation(BaseCallback):
         self.validation_steps = 0
         self.rollout_distances = []
         self.rollout_max_hold = 0
+        self.grasp_samples = 0
+        self.grasp_bilateral_samples = 0
+        self.grasp_opposed_samples = 0
+        self.grasp_lifted_samples = 0
+        self.grasp_max_clearance = 0.0
+        self.grasp_max_downward_force = 0.0
+        self.grasp_pinning_failures = 0
         self.best_score: tuple[float, float, float] | None = None
         self.best_validation_summary: dict[str, Any] | None = None
         self.best_validation_timesteps: int | None = None
@@ -160,7 +167,7 @@ class FixedSeedEvaluation(BaseCallback):
         self.parent_validation = parent_validation
         self.control_diagnostics = RolloutControlDiagnostics(signature)
         self.control_metric_keys: set[str] = set()
-        self.eval_env = SO101ReachEnv()
+        self.eval_env = SO101GraspEnv()
         self.last_evaluation = -1
 
     def training_metadata(self) -> dict[str, Any]:
@@ -266,6 +273,17 @@ class FixedSeedEvaluation(BaseCallback):
             if distance is not None and math.isfinite(distance):
                 self.rollout_distances.append(float(distance))
             self.rollout_max_hold = max(self.rollout_max_hold, int(info.get("hold_steps", 0)))
+            if "fixed_jaw_contact" in info and "moving_jaw_contact" in info:
+                self.grasp_samples += 1
+                self.grasp_bilateral_samples += int(info["fixed_jaw_contact"] and info["moving_jaw_contact"])
+                self.grasp_opposed_samples += int(info.get("opposed_jaw_contacts", False))
+                clearance = float(info.get("lift_clearance_m", 0.0))
+                self.grasp_lifted_samples += int(clearance >= 0.02 and not info.get("ball_supported", True))
+                self.grasp_max_clearance = max(self.grasp_max_clearance, clearance)
+                self.grasp_max_downward_force = max(
+                    self.grasp_max_downward_force, float(info.get("peak_downward_robot_force_n", 0.0)),
+                )
+                self.grasp_pinning_failures += int(info.get("pinning", False))
         if self.num_timesteps >= self.next_evaluation:
             self.evaluate()
             self.next_evaluation = self.num_timesteps + self.eval_frequency
@@ -274,6 +292,10 @@ class FixedSeedEvaluation(BaseCallback):
     def _on_rollout_start(self) -> None:
         self.rollout_distances = []
         self.rollout_max_hold = 0
+        self.grasp_samples = self.grasp_bilateral_samples = self.grasp_lifted_samples = 0
+        self.grasp_opposed_samples = 0
+        self.grasp_max_clearance = self.grasp_max_downward_force = 0.0
+        self.grasp_pinning_failures = 0
         self.control_diagnostics.reset()
 
     def _on_rollout_end(self) -> None:
@@ -298,6 +320,14 @@ class FixedSeedEvaluation(BaseCallback):
                 fraction = sum(d < threshold / 1000 for d in self.rollout_distances) / count
                 self.logger.record(f"rollout/within_{threshold}mm_fraction", fraction)
         self.logger.record("rollout/maximum_hold_steps", self.rollout_max_hold)
+        if self.grasp_samples:
+            self.logger.record("grasp/observed_samples", self.grasp_samples)
+            self.logger.record("grasp/bilateral_contact_fraction", self.grasp_bilateral_samples / self.grasp_samples)
+            self.logger.record("grasp/opposed_contact_fraction", self.grasp_opposed_samples / self.grasp_samples)
+            self.logger.record("grasp/unsupported_lift_fraction", self.grasp_lifted_samples / self.grasp_samples)
+            self.logger.record("grasp/maximum_clearance_m", self.grasp_max_clearance)
+            self.logger.record("grasp/maximum_downward_robot_force_n", self.grasp_max_downward_force)
+            self.logger.record("grasp/pinning_failures", self.grasp_pinning_failures)
 
     def _on_training_end(self) -> None:
         if self.last_evaluation != self.num_timesteps:
@@ -379,7 +409,7 @@ def main(argv: list[str] | None = None) -> None:
         if args.resume is not None:
             # Resolve 'latest' before creating the new run replaces its pointer.
             checkpoint_path = current_checkpoint() if args.resume == "latest" else Path(args.resume)
-            probe = SO101ReachEnv()
+            probe = SO101GraspEnv()
             try:
                 args.resume_signature = environment_signature(probe)
                 args.resume_checkpoint = inspect_resume_checkpoint(checkpoint_path, args.resume_signature)
@@ -461,7 +491,7 @@ def _run(args, output: Path) -> None:
     if resume is not None:
         signature = args.resume_signature
     else:
-        probe = SO101ReachEnv()
+        probe = SO101GraspEnv()
         try:
             signature = environment_signature(probe)
         finally:
@@ -484,7 +514,7 @@ def _run(args, output: Path) -> None:
     def make_env(index: int):
         def factory():
             monitored = Monitor(
-                SO101ReachEnv(),
+                SO101GraspEnv(),
                 filename=str(output / f"monitor_{index}.csv"),
                 info_keywords=("is_success", "distance", "hold_steps"),
             )

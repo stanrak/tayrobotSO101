@@ -2,7 +2,7 @@
 
 ## Project
 
-This repository develops a MuJoCo simulation of the SO-101 robot and a PPO reach-and-hold learning task. The default application opens manual laptop keyboard control. Training, evaluation, and experiment inspection are separate entry points.
+This repository develops a MuJoCo simulation of the SO-101 robot and a PPO stage-one grasp/lift/hold learning task with a retained reach-only environment. The default application opens manual laptop keyboard control. Training, evaluation, and experiment inspection are separate entry points.
 
 ## Authority and preflight
 

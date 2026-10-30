@@ -97,7 +97,7 @@ class SO101ReachEnv(gym.Env):
     action_low = np.array([-0.5, -1.15, 0.8])
     action_high = np.array([0.5, -0.45, 1.6])
     max_steps = 1200
-    target_min_steps = 1200
+    target_min_steps = 6000  # Five simulated minutes at 20 Hz, across attempts.
     frame_skip = 50
     success_distance = 0.015
     hold_required = 10
@@ -140,7 +140,7 @@ class SO101ReachEnv(gym.Env):
     @property
     def task_config(self) -> dict:
         return {
-            "task": "SO101ReachableSurfaceBall-v3", "observation_version": 2,
+            "task": "SO101ReachableSurfaceBall-v4", "observation_version": 2,
             "home": self.home.tolist(), "action_low": self.action_low.tolist(),
             "action_high": self.action_high.tolist(), "max_steps": self.max_steps,
             "frame_skip": self.frame_skip, "dt": self.dt,
@@ -150,7 +150,7 @@ class SO101ReachEnv(gym.Env):
             "target_duration_seconds": self.target_min_steps * self.dt,
             "target_reset": "reuse spawn across unseeded resets; change at cumulative step budget; seed or new_target overrides",
             "success_distance_m": self.success_distance, "hold_required": self.hold_required,
-            "max_joint_speed_rad_s": self.max_joint_speed, "reset_jitter_rad": 0.04,
+            "max_joint_speed_rad_s": self.max_joint_speed, "reset_jitter_rad": 0.0,
             "minimum_initial_goal_distance_m": 0.04,
             "maximum_hold_joint_speed_rad_s": 0.3,
             "collision_penetration_m": 0.004,
@@ -252,7 +252,6 @@ class SO101ReachEnv(gym.Env):
         previous = self._target_spawn_position if seed is None else None
         mujoco.mj_resetData(self.model, self.data)
         self.data.qpos[:6] = self.home
-        self.data.qpos[:3] += self.np_random.uniform(-0.04, 0.04, 3)
         self.data.ctrl[:] = self.data.qpos[:6]
         mujoco.mj_forward(self.model, self.data)
         if change_target:

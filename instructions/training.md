@@ -43,7 +43,7 @@ The trial budget, an environment's target-duration budget, and a full trainer's 
 - Record reward scale, backend, PPO learning rate/epoch/KL settings, and exploration settings in experiment configuration. Do not silently change multiple learning settings while presenting a result as a single-variable comparison.
 - Existing CLI options expose separate learning-rate, epoch, KL, and gSDE experiments. The default learning rate and epoch count remain `0.0003` and `10`; validation defaults to every `100000` training transitions.
 - `subproc` is an opt-in backend for headless full training. Keep its rejection with `--trial` or `--viewer` before output creation or environment initialization.
-- Observation extensions, running normalization, reward shaping, and other algorithms are separate experiments. Do not claim they are enabled by the current fixed reward scale or migrate old checkpoints into them automatically.
+- The user-authorized stage-one grasp task adds six-action control, physical-contact/velocity observations and grasp-specific reward under a new signature. Do not treat earlier reach results as grasp performance. Further observation extensions, running normalization, reward shaping, and other algorithms are separate experiments. Do not claim they are enabled by the current fixed reward scale or migrate old checkpoints into them automatically.
 
 ## Counters and diagnostics
 

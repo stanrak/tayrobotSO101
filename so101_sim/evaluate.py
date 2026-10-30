@@ -20,7 +20,7 @@ import mujoco
 from stable_baselines3 import PPO
 import torch
 
-from .env import SO101ReachEnv
+from .grasp import SO101GraspEnv
 from .outputs import OutputError, current_checkpoint, evaluation_output
 
 
@@ -42,7 +42,7 @@ def metadata_path(checkpoint: Path) -> Path:
     return checkpoint.with_suffix(".metadata.json")
 
 
-def environment_signature(env: SO101ReachEnv) -> dict[str, Any]:
+def environment_signature(env: SO101GraspEnv) -> dict[str, Any]:
     """Describe task semantics and immutable assets used by a checkpoint."""
     config = env.task_config
     if callable(config):
@@ -97,7 +97,7 @@ def save_checkpoint(
     )
 
 
-def load_checked_policy(checkpoint: Path, env: SO101ReachEnv) -> tuple[PPO, dict[str, Any]]:
+def load_checked_policy(checkpoint: Path, env: SO101GraspEnv) -> tuple[PPO, dict[str, Any]]:
     checkpoint = checkpoint.resolve()
     if checkpoint.suffix != ".zip":
         checkpoint = checkpoint.with_suffix(".zip")
@@ -146,7 +146,7 @@ def _sync_playback_view(viewer, model, data, state: np.ndarray) -> None:
 
 
 def run_episodes(
-    env: SO101ReachEnv,
+    env: SO101GraspEnv,
     seeds: Iterable[int],
     *,
     model: PPO | None = None,
@@ -188,6 +188,8 @@ def run_episodes(
             minimum_distance = float(info["distance"])
             initial_distance = minimum_distance
             maximum_hold = 0
+            maximum_clearance = 0.0
+            maximum_downward_force = 0.0
             done = False
             steps = 0
             while not done:
@@ -206,6 +208,8 @@ def run_episodes(
                 episode_return += float(reward)
                 minimum_distance = min(minimum_distance, float(info["distance"]))
                 maximum_hold = max(maximum_hold, int(info["hold_steps"]))
+                maximum_clearance = max(maximum_clearance, float(info.get("lift_clearance_m", 0.0)))
+                maximum_downward_force = max(maximum_downward_force, float(info.get("peak_downward_robot_force_n", 0.0)))
                 done = bool(terminated or truncated)
                 control_steps += 1
                 if progress is not None:
@@ -225,9 +229,12 @@ def run_episodes(
                     "maximum_hold_steps": maximum_hold,
                     "is_success": bool(info["is_success"]),
                     "collision": bool(info.get("collision", False)),
+                    "pinning": bool(info.get("pinning", False)),
+                    "maximum_lift_clearance_m": maximum_clearance,
+                    "maximum_downward_robot_force_n": maximum_downward_force,
                     "terminated": bool(terminated),
                     "truncated": bool(truncated),
-                    "termination_reason": "success" if info["is_success"] else "collision" if info.get("collision", False) else "time_limit" if truncated else "other_failure",
+                    "termination_reason": info.get("termination_reason") or ("success" if info["is_success"] else "collision" if info.get("collision", False) else "time_limit" if truncated else "other_failure"),
                 }
             )
             if progress is not None:
@@ -239,6 +246,7 @@ def run_episodes(
         "episodes": len(rows),
         "successes": successes,
         "collision_episodes": sum(row["collision"] for row in rows),
+        "pinning_episodes": sum(row["pinning"] for row in rows),
         "time_limit_episodes": sum(row["truncated"] for row in rows),
         "success_rate": successes / len(rows),
         "success_rate_95pct_wilson_interval": _success_interval(successes, len(rows)),
@@ -287,7 +295,7 @@ def evaluate_checkpoint(
     if episodes < 1:
         raise ValueError("episodes must be at least one")
     torch.set_num_threads(1)
-    env = SO101ReachEnv()
+    env = SO101GraspEnv()
     try:
         print(f"Loading evaluation checkpoint: {checkpoint}", flush=True)
         model, metadata = load_checked_policy(checkpoint, env)
@@ -320,7 +328,7 @@ def evaluate_checkpoint(
             "deterministic_trained_policy": True,
             "rendered_policy_playback": render,
             "viewer_physics_edits_ignored": render,
-            "success_definition": "Reach within the configured tolerance at the configured joint speed, hold for the configured consecutive steps, and avoid collision failure.",
+            "success_definition": "Both jaw pads carry force; ball bottom is at least 20mm above the tabletop without support; world/relative motion is slow for 10 consecutive control steps, with no failure.",
             "results": results,
         }
     finally:

@@ -18,6 +18,7 @@ These documents explain how to use the SO-101 simulation, how the learning task 
 | --- | --- |
 | [Getting started](getting-started.md) | Dependencies, Windows launchers, keyboard controls, troubleshooting, and model assets |
 | [Simulation environment](environment.md) | Desk and ball dynamics, goal placement, action/observation spaces, reward, and success conditions |
+| [Grasping](grasping.md) | Stage-one six-joint grasp/lift/hold interface, pinning detection and compatibility |
 | [Training](training.md) | PPO modes, command options, transition budgets, viewer behavior, reward scaling, and critic diagnostics |
 | [Experiments](experiments.md) | Run folders, checkpoint compatibility, validation and held-out evaluation, comparison tables, and historical records |
 | [Data versioning](data-versioning.md) | Local DVC snapshots of finalized runs, status checks, and private backup storage |
