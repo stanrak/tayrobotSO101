@@ -8,6 +8,7 @@ import csv
 from datetime import datetime, timezone
 import hashlib
 import math
+from numbers import Real
 from pathlib import Path
 import time
 from typing import Any
@@ -33,6 +34,7 @@ LEARNING_DEFAULTS = {
     "log_std_init": -2.0, "learning_rate": 0.0003, "n_epochs": 10,
     "target_kl": None, "use_sde": False, "sde_sample_freq": -1,
 }
+GRASP_REWARD_TERMS = (*SO101GraspEnv.reward_weights, "success", "failure")
 
 
 def _configure_training_logger(output: Path) -> Logger:
@@ -167,6 +169,9 @@ class FixedSeedEvaluation(BaseCallback):
         self.grasp_max_clearance = 0.0
         self.grasp_max_downward_force = 0.0
         self.grasp_pinning_failures = 0
+        self.grasp_gap_stats: dict[str, tuple[int, float, float]] = {}
+        self.grasp_reward_stats: dict[str, tuple[int, float, float]] = {}
+        self.grasp_detail_metric_keys: set[str] = set()
         self.best_score: tuple[float, float, float] | None = None
         self.best_validation_summary: dict[str, Any] | None = None
         self.best_validation_timesteps: int | None = None
@@ -321,6 +326,14 @@ class FixedSeedEvaluation(BaseCallback):
                     self.grasp_max_downward_force, float(info.get("peak_downward_robot_force_n", 0.0)),
                 )
                 self.grasp_pinning_failures += int(info.get("pinning", False))
+            for jaw in ("fixed", "moving"):
+                self._accumulate_grasp_scalar(
+                    self.grasp_gap_stats, jaw, info.get(f"{jaw}_jaw_gap_m"), nonnegative=True,
+                )
+            terms = info.get("reward_terms")
+            if isinstance(terms, dict):
+                for name in GRASP_REWARD_TERMS:
+                    self._accumulate_grasp_scalar(self.grasp_reward_stats, name, terms.get(name))
         if self.num_timesteps >= self.next_evaluation:
             limit = self.training_config.get("environment_step_limit")
             if (self.final_time_budget is not None and limit is not None
@@ -331,6 +344,23 @@ class FixedSeedEvaluation(BaseCallback):
             self.next_evaluation = self.num_timesteps + self.eval_frequency
         return True
 
+    @staticmethod
+    def _accumulate_grasp_scalar(
+        stats: dict[str, tuple[int, float, float]], name: str, value: Any, *, nonnegative: bool = False,
+    ) -> None:
+        # Only the fixed jaw/term allowlists above enter these bounded sums.
+        # Older task infos and malformed optional diagnostics remain unmeasured.
+        if isinstance(value, bool) or not isinstance(value, Real):
+            return
+        try:
+            value = float(value)
+        except (OverflowError, ValueError):
+            return
+        if not math.isfinite(value) or (nonnegative and value < 0):
+            return
+        count, total, minimum = stats.get(name, (0, 0.0, math.inf))
+        stats[name] = (count + 1, total + value, min(minimum, value))
+
     def _on_rollout_start(self) -> None:
         self.rollout_distances = []
         self.rollout_max_hold = 0
@@ -338,6 +368,8 @@ class FixedSeedEvaluation(BaseCallback):
         self.grasp_opposed_samples = 0
         self.grasp_max_clearance = self.grasp_max_downward_force = 0.0
         self.grasp_pinning_failures = 0
+        self.grasp_gap_stats.clear()
+        self.grasp_reward_stats.clear()
         self.control_diagnostics.reset()
 
     def _on_rollout_end(self) -> None:
@@ -346,8 +378,9 @@ class FixedSeedEvaluation(BaseCallback):
         for attribute in ("name_to_value", "name_to_count", "name_to_excluded"):
             pending = getattr(self.logger, attribute, None)
             if isinstance(pending, dict):
-                for name in self.control_metric_keys:
+                for name in self.control_metric_keys | self.grasp_detail_metric_keys:
                     pending.pop(name, None)
+        self.grasp_detail_metric_keys = set()
         control_metrics = self.control_diagnostics.metrics()
         self.control_metric_keys = set(control_metrics)
         for name, value in control_metrics.items():
@@ -370,6 +403,18 @@ class FixedSeedEvaluation(BaseCallback):
             self.logger.record("grasp/maximum_clearance_m", self.grasp_max_clearance)
             self.logger.record("grasp/maximum_downward_robot_force_n", self.grasp_max_downward_force)
             self.logger.record("grasp/pinning_failures", self.grasp_pinning_failures)
+        detail_metrics = {}
+        for jaw, (count, total, minimum) in self.grasp_gap_stats.items():
+            detail_metrics[f"grasp/{jaw}_jaw_gap_mean_m"] = total / count
+            detail_metrics[f"grasp/{jaw}_jaw_gap_minimum_m"] = minimum
+            detail_metrics[f"grasp/{jaw}_jaw_gap_samples"] = count
+        for name, (count, total, _) in self.grasp_reward_stats.items():
+            # Environment terms are raw rewards, before the training wrapper.
+            detail_metrics[f"grasp/reward_{name}_mean"] = total / count
+            detail_metrics[f"grasp/reward_{name}_samples"] = count
+        self.grasp_detail_metric_keys = set(detail_metrics)
+        for name, value in detail_metrics.items():
+            self.logger.record(name, value)
 
     def _on_training_end(self) -> None:
         if self.final_time_budget is not None and self.final_deadline is None:

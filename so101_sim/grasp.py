@@ -30,7 +30,12 @@ class SO101GraspEnv(SO101ReachEnv):
     pin_support_excess_threshold = 0.5
     pin_maximum_ball_speed = 0.05
     pin_required_seconds = 0.3
-    step_cost_scale = 0.01
+    jaw_gap_limit = 0.5
+    jaw_gap_scale = 0.04
+    reward_weights = {
+        "time": 0.005, "approach": 0.03, "clamp": 0.01,
+        "lift": 0.01, "hold": 0.01, "motion": 0.005, "pressing": 0.01,
+    }
 
     def __init__(self, render_mode: str | None = None):
         super().__init__(render_mode=render_mode)
@@ -92,7 +97,7 @@ class SO101GraspEnv(SO101ReachEnv):
         config = super().task_config
         config.pop("success_distance_m", None)
         config.update({
-            "task": "SO101BallGraspLiftHold-v1", "observation_version": 1,
+            "task": "SO101BallGraspLiftHold-v2", "observation_version": 1,
             "base_environment_source_sha256": self._base_source_sha256,
             "action_low": self.grasp_action_low.tolist(),
             "action_high": self.grasp_action_high.tolist(),
@@ -117,8 +122,10 @@ class SO101GraspEnv(SO101ReachEnv):
                 "fixed": sorted(self.fixed_jaw_geoms), "moving": sorted(self.moving_jaw_geoms),
             },
             "threshold_status": "initial engineering thresholds; not material/force calibration or learned-performance evidence",
-            "step_cost_scale": self.step_cost_scale,
-            "reward": "0.01*(-1 -2*d -0.002*sum(qvel[:6]^2) +0.5*opposed_jaws +0.5*opposed_jaws*unsupported*clip(clearance/20mm,0,1) -2*clip(downward_supported_force/1N,0,5)) +10*success -10*failure",
+            "reward_weights": dict(self.reward_weights),
+            "jaw_gap_limit_m": self.jaw_gap_limit,
+            "jaw_gap_scale_m": self.jaw_gap_scale,
+            "reward": "negative bounded time, mean actual pad-gap/(gap+40mm), missing opposed clamp, missing unsupported clamped lift, missing stable hold, bounded joint motion and supported pressing costs; +10*success -10*failure; nonterminal cost at most 0.08",
             "observation": "normalized six q; six qvel*0.1; normalized six ctrl; ball centre*3; ball-ee*5; ball world linear and angular velocity; ball-ee relative world linear velocity; fixed/moving/opposed pad contact and support flags; hold and pin fractions",
             "collision_failure": "legacy robot/self/support penetration >4mm, nonfinite state, or sustained force-based ball pinning",
             "ball_lost": "ball centre more than 30mm below desktop",
@@ -211,6 +218,48 @@ class SO101GraspEnv(SO101ReachEnv):
                     and np.linalg.norm(relative) <= self.maximum_relative_speed
                     and np.linalg.norm(self.data.qvel[:6]) < self.maximum_hold_joint_speed)
 
+    def _jaw_gaps(self) -> np.ndarray:
+        """Measure both physical pad surfaces without providing robot actions.
+
+        Gripper rotation does not move gripperframe, so its distance alone
+        cannot reward useful closure before the first opposed contact. Signed
+        geom distances provide that signal; penetration earns no extra credit.
+        """
+        return np.array([
+            np.clip(min(mujoco.mj_geomDistance(
+                self.model, self.data, self.ball_geom, geom, self.jaw_gap_limit, None,
+            ) for geom in geoms), 0.0, self.jaw_gap_limit)
+            for geoms in (self.fixed_jaw_geoms, self.moving_jaw_geoms)
+        ])
+
+    def _reward_terms(self, contacts: dict, gaps: np.ndarray) -> dict[str, float]:
+        """Bound each nonterminal cost, keeping unsuccessful waiting negative.
+
+        At the trainer's gamma=.99, even the maximum 0.08 step cost has
+        discounted magnitude at most 8, less than the terminal failure cost 10.
+        Useful closure changes the approach term before a grasp exists. Lift
+        and hold credit still require actual opposed pads and no static support.
+        """
+        opposed = bool(contacts["opposed_jaw_contacts"])
+        clamped = opposed and not contacts["ball_supported"]
+        clearance = self.goal[2] - BALL_RADIUS - TABLE_SIZE[2]
+        lift = float(np.clip(clearance / self.lift_clearance, 0, 1)) if clamped else 0.0
+        hold = min(1.0, self.hold_steps / self.hold_required) if clamped else 0.0
+        with np.errstate(over="ignore", invalid="ignore"):
+            speed_squared = float(np.square(self.data.qvel[:6]).sum())
+        motion = speed_squared / (1.0 + speed_squared) if np.isfinite(speed_squared) else 1.0
+        pressing = self._downward_force(contacts) if contacts["ball_supported"] else 0.0
+        deficits = {
+            "time": 1.0,
+            "approach": float(np.mean(gaps / (gaps + self.jaw_gap_scale))),
+            "clamp": float(not opposed),
+            "lift": 1.0 - lift,
+            "hold": 1.0 - hold,
+            "motion": motion,
+            "pressing": float(np.clip(pressing / self.pin_force_threshold, 0, 1)),
+        }
+        return {name: -self.reward_weights[name] * deficit for name, deficit in deficits.items()}
+
     def _observation(self) -> np.ndarray:
         contacts = self._contacts()
         linear, angular, relative = self._velocities()
@@ -291,18 +340,14 @@ class SO101GraspEnv(SO101ReachEnv):
             self._failure_reason = "collision"
         failed = self._failure_reason is not None
         success = self.hold_steps >= self.hold_required and not failed
-        distance = float(np.linalg.norm(self.goal - self.ee_position))
-        bilateral = contacts["opposed_jaw_contacts"]
-        lift = np.clip((self.goal[2] - BALL_RADIUS - TABLE_SIZE[2]) / self.lift_clearance, 0, 1)
-        # All nonterminal rewards remain nonpositive. A supported press earns no
-        # lift term, and a sustained downward press terminates the attempt.
-        pressing = self._downward_force(contacts) if contacts["ball_supported"] else 0.0
-        step_reward = (-1 - 2 * distance - 0.002 * np.square(self.data.qvel[:6]).sum()
-                       + 0.5 * bilateral + 0.5 * bilateral * (not contacts["ball_supported"]) * lift
-                       - 2 * np.clip(pressing / self.pin_force_threshold, 0, 5))
-        reward = self.step_cost_scale * step_reward + 10 * success - 10 * failed
+        gaps = self._jaw_gaps()
+        reward_terms = self._reward_terms(contacts, gaps)
+        reward_terms.update(success=10.0 * success, failure=-10.0 * failed)
+        reward = sum(reward_terms.values())
         timed_out = self.steps >= self.max_steps or self.target_steps >= self.target_min_steps
         info = self._info(success, failed)
+        info.update(fixed_jaw_gap_m=float(gaps[0]), moving_jaw_gap_m=float(gaps[1]),
+                    reward_terms=reward_terms)
         if timed_out and not (success or failed):
             info["termination_reason"] = "time_limit"
         return self._observation(), float(reward), bool(success or failed), bool(timed_out and not (success or failed)), info

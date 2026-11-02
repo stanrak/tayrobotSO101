@@ -4,7 +4,7 @@
 
 The trainer uses PPO with a small multilayer perceptron on the CPU. Manual keyboard control is a separate application: starting the simulator does not start training or load a policy. All commands below run from the repository root in PowerShell, using the prepared project environment described in [Getting started](getting-started.md).
 
-The default task is [stage-one grasp, lift and hold](grasping.md), using six actuator actions. It requires a fresh compatible checkpoint; earlier three-joint reach checkpoints cannot be resumed into it. Each target is reused for 300 simulated seconds across retries, with exact-home resets. Implementing this task does not establish learned grasp performance.
+The default task is [stage-one grasp, lift and hold v2](grasping.md), using six actuator actions and continuous approach feedback from both jaw pads. It requires a fresh compatible checkpoint; earlier three-joint reach and grasp-v1 checkpoints cannot be resumed into it. Each target is reused for 300 simulated seconds across retries, with exact-home resets. Implementing this task does not establish learned grasp performance.
 
 ## Choose a run mode
 
@@ -39,7 +39,7 @@ To continue from the latest available full-training checkpoint:
 .\.venv\Scripts\python -m so101_sim.train --timesteps 300000 --viewer
 ```
 
-This starts new weights and optimizer state. Continuing a historical reach policy requires its matching source and environment; supplying its checkpoint path alone does not bypass the checks. Resume preflight rejects an incompatible checkpoint before allocating a new run or changing the latest pointer.
+This starts new weights and optimizer state, and is also the way to begin using the v2 jaw-gap reward after a grasp-v1 run. Continuing a historical policy requires its matching source and environment; supplying its checkpoint path alone does not bypass the checks. Resume preflight rejects an incompatible checkpoint before allocating a new run or changing the latest pointer.
 
 Continuation restores policy weights, the Adam optimizer state, and cumulative training counters through `DiagnosticPPO`. The new session initializes environments and random generators using the selected seed. It does not restore the previous ball pose, unfinished episode, or partially collected rollout, so it is not an exact replay of an uninterrupted process.
 

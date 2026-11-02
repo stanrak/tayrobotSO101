@@ -2,7 +2,7 @@
 
 [Environment](environment.md) · [Training](training.md) · [Development](development.md)
 
-The default training and checkpoint evaluation environment is `SO101BallGraspLiftHold-v1`, implemented by `SO101GraspEnv` in [grasp.py](../so101_sim/grasp.py). The aim is to grip the free ball between the two jaws, lift it clear of the tabletop and hold it steadily. Implemented success checks do not demonstrate that an untrained or historical policy can accomplish this sequence.
+The default training and checkpoint evaluation environment is `SO101BallGraspLiftHold-v2`, implemented by `SO101GraspEnv` in [grasp.py](../so101_sim/grasp.py). The aim is to grip the free ball between the two jaws, lift it clear of the tabletop and hold it steadily. Implemented success checks do not demonstrate that an untrained or historical policy can accomplish this sequence.
 
 ## Control and observations
 
@@ -47,12 +47,28 @@ Targets last 6,000 control steps per environment, or five simulated minutes, acr
 
 ## Reward and diagnostics
 
-The raw reward combines a nonpositive time/distance/velocity cost with partial credit for opposed jaw contact and unsupported lift, a supported downward-force penalty, a success bonus and a failure penalty. The entire nonterminal shaping term is scaled by 0.01 inside the task, while terminal success/failure remain +10/-10. This balances ordinary waiting costs against early failure; it is separate from the unchanged trainer RewardScale multiplier. Nonterminal reward stays nonpositive; proximity alone supplies no grasp success. Exact coefficients and thresholds are saved in `task_config`. Reward shaping is a starting design and needs controlled learning evidence before claiming improvement.
+The approach cost uses the shortest distance from the ball surface to each actual jaw pad group. Closing the moving jaw leaves `gripperframe` stationary, so distance to that site alone cannot distinguish useful closure before opposed contact. Both pad gaps now contribute continuously: each gap `g` is clipped to 0–0.5 m and transformed as `g / (g + 0.04 m)`. Penetration earns no additional proximity credit. These measurements affect rewards and diagnostics; they add no policy inputs or controller actions.
 
-Generic PPO action/critic diagnostics operate on all six actions. Passive grasp logs record bilateral-contact fraction, opposed-contact fraction, unsupported-lift fraction, maximum ball clearance, maximum downward robot force and pinning failures. A lifted sample alone is not necessarily a bilateral grasp. The older observation-decoded three-joint control diagnostics deliberately disable themselves for this new layout. Evaluation records preserve pinning reasons and maximum lift/force separately from actual success.
+The raw nonterminal reward is the negative sum of bounded costs:
+
+| Cost | Maximum magnitude | Reduced by |
+| --- | ---: | --- |
+| Time | 0.005 | Fixed cost per control step |
+| Approach | 0.030 | Mean of the two transformed pad gaps |
+| Missing clamp | 0.010 | Actual opposed, force-bearing pad contact |
+| Missing lift | 0.010 | Opposed clamp without support, up to 20 mm clearance |
+| Missing hold | 0.010 | Consecutive stable-hold progress while clamped without support |
+| Joint motion | 0.005 | Lower squared six-joint speed, transformed as `v² / (1 + v²)` |
+| Supported pressing | 0.010 | Lower supported downward robot force, capped at 1 N |
+
+Success adds +10 and failure adds -10. Every nonterminal reward lies between -0.08 and -0.005. Thus waiting cannot collect positive reward, and at the trainer's discount factor 0.99 even the maximum ongoing cost has discounted magnitude at most 8, below the immediate failure penalty. A supported press, single-jaw touch or unsupported toss earns no lift/hold credit. The force-based pinning detector remains separate from the bounded force cost.
+
+The trainer still multiplies raw rewards by 0.01; Monitor and evaluation retain raw units. The former task-level `step_cost_scale` does not apply to these explicitly weighted terms. Exact weights, gap scales and thresholds are saved in `task_config`. Regression fixtures verify useful closure receives a better reward before opposed contact; learning speed and acquisition reliability require separate training evidence.
+
+Generic PPO action/critic diagnostics operate on all six actions. Passive grasp logs record bilateral-contact fraction, opposed-contact fraction, unsupported-lift fraction, maximum ball clearance, maximum downward robot force and pinning failures. Per-step info also exposes both pad gaps and individual raw reward terms. A lifted sample alone is not necessarily a bilateral grasp. The older observation-decoded three-joint control diagnostics deliberately disable themselves for this new layout. Evaluation records preserve pinning reasons and maximum lift/force separately from actual success.
 
 ## Compatibility and verification limits
 
-This is a separate task and observation/action contract. Checkpoint signatures include the grasp implementation and the shared base environment source hash. Earlier reach checkpoints are rejected; they are not converted or reused automatically. Manual startup remains separate from training.
+Version 2 changes the reward contract while preserving the 39-value observation, six actions, physical workspace, target sampler and success conditions. Checkpoint signatures include the grasp implementation and the shared base environment source hash. Earlier reach and grasp-v1 checkpoints are rejected; start a fresh run for the new reward. They are not converted or reused automatically. Manual startup remains separate from training.
 
 The existing scratch forward-kinematics sampler proves contact-safe reach proximity inside the chosen action envelope. It does not certify a complete collision-free grasp/lift trajectory for every spawn. Contact fixtures can verify that the unchanged jaws physically support a free ball, but an arranged already-grasped fixture does not prove a policy can acquire it from the table. Grasp acquisition, coverage over sampled positions, reward tuning and generalization remain empirical learning questions.
