@@ -20,6 +20,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 import torch
 
 from .grasp import SO101GraspEnv
+from .visual_grasp import SO101VisualGraspEnv
 from .diagnostics import RolloutControlDiagnostics
 from .evaluate import environment_signature, evaluate_checkpoint, run_episodes, save_checkpoint, write_json
 from .learning import DiagnosticPPO as PPO, RewardScale
@@ -34,7 +35,19 @@ LEARNING_DEFAULTS = {
     "log_std_init": -2.0, "learning_rate": 0.0003, "n_epochs": 10,
     "target_kl": None, "use_sde": False, "sde_sample_freq": -1,
 }
-GRASP_REWARD_TERMS = (*SO101GraspEnv.reward_weights, "success", "failure")
+GRASP_REWARD_TERMS = (
+    *SO101GraspEnv.reward_weights, "visual_acquisition", "visual_centering",
+    "visual_recent", "success", "failure",
+)
+
+
+def _task_environment(task_mode: str):
+    """Construct the selected task without capturing constructors in a mapping."""
+    if task_mode == "vision":
+        return SO101VisualGraspEnv()
+    if task_mode == "state":
+        return SO101GraspEnv()
+    raise ValueError(f"Unknown training task: {task_mode}")
 
 
 def _configure_training_logger(output: Path) -> Logger:
@@ -172,6 +185,8 @@ class FixedSeedEvaluation(BaseCallback):
         self.grasp_gap_stats: dict[str, tuple[int, float, float]] = {}
         self.grasp_reward_stats: dict[str, tuple[int, float, float]] = {}
         self.grasp_detail_metric_keys: set[str] = set()
+        self.vision_stats: dict[str, tuple[int, float, float]] = {}
+        self.vision_metric_keys: set[str] = set()
         self.best_score: tuple[float, float, float] | None = None
         self.best_validation_summary: dict[str, Any] | None = None
         self.best_validation_timesteps: int | None = None
@@ -179,7 +194,7 @@ class FixedSeedEvaluation(BaseCallback):
         self.parent_validation = parent_validation
         self.control_diagnostics = RolloutControlDiagnostics(signature)
         self.control_metric_keys: set[str] = set()
-        self.eval_env = SO101GraspEnv()
+        self.eval_env = _task_environment(training_config.get("task_mode", "state"))
         self.last_evaluation = -1
 
     def training_metadata(self) -> dict[str, Any]:
@@ -334,6 +349,16 @@ class FixedSeedEvaluation(BaseCallback):
             if isinstance(terms, dict):
                 for name in GRASP_REWARD_TERMS:
                     self._accumulate_grasp_scalar(self.grasp_reward_stats, name, terms.get(name))
+            for name in ("visible", "acquired", "memory_valid"):
+                value = info.get(f"vision_{name}")
+                if isinstance(value, bool):
+                    self._accumulate_grasp_scalar(self.vision_stats, name, float(value))
+            confidence = info.get("vision_confidence")
+            if isinstance(confidence, Real) and not isinstance(confidence, bool) and 0 <= confidence <= 1:
+                self._accumulate_grasp_scalar(self.vision_stats, "confidence", confidence)
+            self._accumulate_grasp_scalar(
+                self.vision_stats, "estimate_age_seconds", info.get("vision_estimate_age_seconds"), nonnegative=True,
+            )
         if self.num_timesteps >= self.next_evaluation:
             limit = self.training_config.get("environment_step_limit")
             if (self.final_time_budget is not None and limit is not None
@@ -370,6 +395,7 @@ class FixedSeedEvaluation(BaseCallback):
         self.grasp_pinning_failures = 0
         self.grasp_gap_stats.clear()
         self.grasp_reward_stats.clear()
+        self.vision_stats.clear()
         self.control_diagnostics.reset()
 
     def _on_rollout_end(self) -> None:
@@ -378,7 +404,7 @@ class FixedSeedEvaluation(BaseCallback):
         for attribute in ("name_to_value", "name_to_count", "name_to_excluded"):
             pending = getattr(self.logger, attribute, None)
             if isinstance(pending, dict):
-                for name in self.control_metric_keys | self.grasp_detail_metric_keys:
+                for name in self.control_metric_keys | self.grasp_detail_metric_keys | self.vision_metric_keys:
                     pending.pop(name, None)
         self.grasp_detail_metric_keys = set()
         control_metrics = self.control_diagnostics.metrics()
@@ -415,6 +441,14 @@ class FixedSeedEvaluation(BaseCallback):
         self.grasp_detail_metric_keys = set(detail_metrics)
         for name, value in detail_metrics.items():
             self.logger.record(name, value)
+        vision_metrics = {}
+        for name, (count, total, _) in self.vision_stats.items():
+            suffix = "fraction" if name in ("visible", "acquired", "memory_valid") else "mean"
+            vision_metrics[f"vision/{name}_{suffix}"] = total / count
+            vision_metrics[f"vision/{name}_samples"] = count
+        self.vision_metric_keys = set(vision_metrics)
+        for name, value in vision_metrics.items():
+            self.logger.record(name, value)
 
     def _on_training_end(self) -> None:
         if self.final_time_budget is not None and self.final_deadline is None:
@@ -444,8 +478,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--output", type=Path, help="Optional custom empty directory. Default: a new experiment directory under local-artifacts/runs/experiments for every invocation.")
     parser.add_argument("--resume", metavar="CHECKPOINT", help="Continue a full-training checkpoint, or 'latest'. --timesteps counts additional transitions; the default remains a fresh policy.")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--task", choices=("vision", "state"), default="vision", help="Learn wrist-camera search and grasp (default: vision), or use the separate simulator-state grasp task. Checkpoints must match the selected task.")
     parser.add_argument("--viewer", "--render", action="store_true", help="Watch actual training in a live MuJoCo viewer (environment 0).")
     parser.add_argument("--viewer-speed", type=_finite_float, default=1.0, help="Viewer simulation speed multiplier (default: 1, real time).")
+    parser.add_argument("--wrist-camera", action="store_true", help="Show the wrist RGB inset with --viewer. --task vision selects camera-derived policy inputs; this flag only adds their display.")
     parser.add_argument("--envs", type=int, help="Parallel environments (startup trial: 1 only; full training default: 8).")
     parser.add_argument("--eval-frequency", type=int, default=100_000)
     parser.add_argument("--eval-episodes", type=int, help="Validation episodes per round (quick: 5; full: 20).")
@@ -482,6 +518,8 @@ def main(argv: list[str] | None = None) -> None:
     args.envs = args.envs if args.envs is not None else (1 if trial else 8)
     if args.viewer_speed <= 0:
         parser.error("viewer-speed must be positive")
+    if args.wrist_camera and not args.viewer:
+        parser.error("--wrist-camera requires --viewer")
     if trial and args.resume is not None:
         parser.error("--resume is unavailable with --trial; startup trials always begin with a fresh policy")
     if args.reward_scale <= 0 or args.learning_rate <= 0 or args.n_epochs < 1:
@@ -509,7 +547,7 @@ def main(argv: list[str] | None = None) -> None:
         if args.resume is not None:
             # Resolve 'latest' before creating the new run replaces its pointer.
             checkpoint_path = current_checkpoint() if args.resume == "latest" else Path(args.resume)
-            probe = SO101GraspEnv()
+            probe = _task_environment(args.task)
             try:
                 args.resume_signature = environment_signature(probe)
                 args.resume_checkpoint = inspect_resume_checkpoint(checkpoint_path, args.resume_signature)
@@ -536,6 +574,7 @@ def _run(args, output: Path) -> None:
     torch.use_deterministic_algorithms(True)
     config = {
         "algorithm": "PPO",
+        "task_mode": args.task,
         "mode": "startup_trial" if trial else "full_training",
         "requested_timesteps": args.timesteps,
         "requested_timesteps_unit": "new training transitions in this session",
@@ -592,12 +631,13 @@ def _run(args, output: Path) -> None:
         **{f"starting_{key}": value for key, value in starting.items()},
         "live_viewer": args.viewer,
         "viewer_speed": args.viewer_speed if args.viewer else None,
+        "wrist_camera_observer": args.wrist_camera,
         "started_utc": datetime.now(timezone.utc).isoformat(),
     }
     if resume is not None:
         signature = args.resume_signature
     else:
-        probe = SO101GraspEnv()
+        probe = _task_environment(args.task)
         try:
             signature = environment_signature(probe)
         finally:
@@ -620,7 +660,7 @@ def _run(args, output: Path) -> None:
     def make_env(index: int):
         def factory():
             monitored = Monitor(
-                SO101GraspEnv(),
+                _task_environment(args.task),
                 filename=str(output / f"monitor_{index}.csv"),
                 info_keywords=("is_success", "distance", "hold_steps"),
             )
@@ -692,7 +732,7 @@ def _run(args, output: Path) -> None:
         if args.viewer:
             from .training_view import TrainingViewer
 
-            view_callback = TrainingViewer(speed=args.viewer_speed, progress=progress)
+            view_callback = TrainingViewer(speed=args.viewer_speed, progress=progress, wrist_camera=args.wrist_camera)
             callback = CallbackList([view_callback, callback]) if callback is not None else view_callback
         if not trial and args.timesteps is not None:
             step_limit = _TrainingStepLimit(
@@ -794,7 +834,7 @@ def _run(args, output: Path) -> None:
               "Press Ctrl+C to stop evaluation; saved checkpoints are retained.", flush=True)
         heldout_started = time.perf_counter()
         try:
-            evaluation_options = {}
+            evaluation_options = {"task_mode": args.task}
             if args.evaluation_profile == "quick":
                 evaluation_options["policies"] = ("trained",)
             if final_deadline is not None:

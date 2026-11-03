@@ -35,6 +35,8 @@ For a manual window that closes after ten seconds:
 
 The existing `python -m so101_sim.teleop` entry point also opens manual control.
 
+Add `--wrist-camera` to show the original gripper camera as an inset in the viewer. The camera may not see the ball at home. [Wrist camera and visual search](cameras.md) explains the image display and the separate camera-based learning task.
+
 ![Initial desk-mounted SO-101 simulation](simulation.png)
 
 ## Laptop keyboard controls

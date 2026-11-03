@@ -2,7 +2,7 @@
 
 [Environment](environment.md) · [Training](training.md) · [Development](development.md)
 
-The default training and checkpoint evaluation environment is `SO101BallGraspLiftHold-v2`, implemented by `SO101GraspEnv` in [grasp.py](../so101_sim/grasp.py). The aim is to grip the free ball between the two jaws, lift it clear of the tabletop and hold it steadily. Implemented success checks do not demonstrate that an untrained or historical policy can accomplish this sequence.
+The state-based grasp environment is `SO101BallGraspLiftHold-v2`, implemented by `SO101GraspEnv` in [grasp.py](../so101_sim/grasp.py), selected with `--task state`. The default training task adds [camera-based visual search](cameras.md) under a distinct observation and checkpoint contract. Both aim to grip the free ball between the two jaws, lift it clear of the tabletop and hold it steadily. Implemented success checks do not demonstrate that an untrained or historical policy can accomplish this sequence.
 
 ## Control and observations
 

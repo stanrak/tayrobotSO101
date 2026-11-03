@@ -11,13 +11,15 @@ from stable_baselines3.common.callbacks import BaseCallback
 class TrainingViewer(BaseCallback):
     """Display environment zero using an independent model/data snapshot."""
 
-    def __init__(self, *, speed=1.0, progress=lambda: {}):
+    def __init__(self, *, speed=1.0, progress=lambda: {}, wrist_camera=False):
         super().__init__()
         self.speed = speed
         self.progress = progress
         self.viewer = None
         self.episodes = 0
         self.last_status = 0.0
+        self.wrist_camera = wrist_camera
+        self.camera_inset = None
 
     def _on_training_start(self):
         import mujoco.viewer
@@ -31,12 +33,36 @@ class TrainingViewer(BaseCallback):
         )
         with self.viewer.lock():
             self.observed.configure_camera(self.viewer.cam)
+        if self.wrist_camera:
+            from .camera_view import WristCameraInset
+
+            try:
+                self.camera_inset = WristCameraInset(self.observed.model)
+                self._update_camera()
+            except BaseException:
+                self.close()
+                raise
         self.next_frame = time.monotonic()
         print("Live training: observing environment 0. Camera controls only; close the window to stop training.", flush=True)
 
     def _copy_state(self):
         self.view_model.site_pos[:] = self.observed.model.site_pos
         mujoco.mj_copyData(self.view_data, self.view_model, self.observed.data)
+
+    def _update_camera(self):
+        rgb = getattr(self.observed, "current_wrist_rgb", None)
+        if rgb is not None:
+            self.camera_inset.update(
+                self.viewer, self.observed.data,
+                policy_rgb=rgb,
+                policy_detection=self.observed.vision_detection,
+                policy_acquired=self.observed.visual_acquired,
+                policy_position=getattr(self.observed, "visual_position_status", None),
+            )
+        else:
+            self.camera_inset.update(self.viewer, self.observed.data)
+        if not self.viewer.is_running():
+            raise KeyboardInterrupt("Training viewer closed.")
 
     def _on_step(self):
         if not self.viewer.is_running():
@@ -47,6 +73,9 @@ class TrainingViewer(BaseCallback):
         with self.viewer.lock():
             self._copy_state()
         self.viewer.sync()
+        if self.camera_inset is not None:
+            # Use canonical environment data, never GUI-edited observer data.
+            self._update_camera()
         self.next_frame = time.monotonic() + self.observed.dt / self.speed
         done = self.locals.get("dones", [False])[0]
         self.episodes += int(done)
@@ -85,6 +114,11 @@ class TrainingViewer(BaseCallback):
         self.close()
 
     def close(self):
-        if self.viewer is not None:
-            self.viewer.close()
-            self.viewer = None
+        try:
+            if self.camera_inset is not None:
+                self.camera_inset.close()
+                self.camera_inset = None
+        finally:
+            if self.viewer is not None:
+                self.viewer.close()
+                self.viewer = None

@@ -21,11 +21,20 @@ from stable_baselines3 import PPO
 import torch
 
 from .grasp import SO101GraspEnv
+from .visual_grasp import SO101VisualGraspEnv
 from .outputs import OutputError, current_checkpoint, evaluation_output
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = ("numpy", "mujoco", "gymnasium", "stable-baselines3", "torch")
+
+
+def _task_environment(task_mode: str):
+    if task_mode == "vision":
+        return SO101VisualGraspEnv()
+    if task_mode == "state":
+        return SO101GraspEnv()
+    raise ValueError(f"Unknown evaluation task: {task_mode}")
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -347,13 +356,18 @@ def evaluate_checkpoint(
     render: bool = False,
     policies: tuple[str, ...] = ("trained", "no_motion", "random"),
     deadline: float | None = None,
+    task_mode: str = "state",
 ) -> dict[str, Any]:
     """Evaluate selected policies, sharing an optional absolute monotonic deadline.
 
-    The unbounded default remains a complete three-policy held-out evaluation.
+    The API retains the simulator-state task by default for existing callers;
+    the CLI and trainer pass their selected task explicitly. The unbounded
+    default remains a complete three-policy held-out evaluation.
     Budget exhaustion leaves unavailable summaries null, including when it
     happens before environment construction or checkpoint validation.
     """
+    if task_mode not in ("vision", "state"):
+        raise ValueError(f"Unknown evaluation task: {task_mode}")
     if episodes < 1:
         raise ValueError("episodes must be at least one")
     if not policies or len(set(policies)) != len(policies):
@@ -367,7 +381,7 @@ def evaluate_checkpoint(
     try:
         if not _deadline_expired(deadline):
             torch.set_num_threads(1)
-            env = SO101GraspEnv()
+            env = _task_environment(task_mode)
         if env is not None and not _deadline_expired(deadline):
             print(f"Loading evaluation checkpoint: {checkpoint}", flush=True)
             model, metadata = load_checked_policy(checkpoint, env)
@@ -393,6 +407,7 @@ def evaluate_checkpoint(
         complete = all(result["complete"] for result in results.values())
         return {
             "schema_version": 1,
+            "task_mode": task_mode,
             "created_utc": datetime.now(timezone.utc).isoformat(),
             "checkpoint": str(checkpoint.resolve()),
             "checkpoint_sha256": metadata["checkpoint_sha256"] if metadata is not None else None,
@@ -404,7 +419,8 @@ def evaluate_checkpoint(
             "deterministic_trained_policy": True,
             "rendered_policy_playback": render,
             "viewer_physics_edits_ignored": render,
-            "success_definition": "Both jaw pads carry force; ball bottom is at least 20mm above the tabletop without support; world/relative motion is slow for 10 consecutive control steps, with no failure.",
+            "success_definition": "Both jaw pads carry force; ball bottom is at least 20mm above the tabletop without support; world/relative motion is slow for 10 consecutive control steps, with no failure."
+                + (" Visual acquisition requires three consecutive quality RGB control frames earlier in this attempt." if task_mode == "vision" else ""),
             "policies_requested": list(policies),
             "policies_completed": [policy for policy, result in results.items() if result["complete"]],
             "complete": complete,
@@ -419,20 +435,21 @@ def evaluate_checkpoint(
             env.close()
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, help="Checkpoint to inspect (default: latest managed experiment, with legacy local-artifacts/runs/current fallback).")
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--seed", type=int, default=20_000)
+    parser.add_argument("--task", choices=("vision", "state"), default="vision", help="Checkpoint task (default: vision); use state for simulator-state grasp checkpoints. Exact compatibility checks still apply.")
     parser.add_argument("--output", type=Path, help="Optional new report file; existing files are rejected. Default: a unique evaluation directory next to the checkpoint.")
     parser.add_argument("--render", action="store_true", help="Play trained-policy episodes at real time in MuJoCo.")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         with evaluation_output(args.output, checkpoint=args.checkpoint, seed=args.seed) as output:
             checkpoint = (args.checkpoint or current_checkpoint()).resolve()
             if checkpoint.suffix != ".zip":
                 checkpoint = checkpoint.with_suffix(".zip")
-            report = evaluate_checkpoint(checkpoint, episodes=args.episodes, seed=args.seed, render=args.render)
+            report = evaluate_checkpoint(checkpoint, episodes=args.episodes, seed=args.seed, render=args.render, task_mode=args.task)
             report["checkpoint"] = str(checkpoint)
             write_json(output, report)
     except OutputError as exc:

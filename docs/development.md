@@ -19,6 +19,9 @@ The project separates manual interaction, the physical learning environment, tra
 | [`so101_sim/lineage.py`](../so101_sim/lineage.py) | Exact-parent saved-validation matching and separate continuation comparison records. |
 | [`so101_sim/resume.py`](../so101_sim/resume.py) | Continuation compatibility checks and restoration of diagnostic PPO state and optimizer. |
 | [`so101_sim/training_view.py`](../so101_sim/training_view.py) | Observation of actual training state through independent viewer model/data copies. |
+| [`so101_sim/camera_view.py`](../so101_sim/camera_view.py) | Original wrist-camera inset; displays cached actor images in visual mode. |
+| [`so101_sim/vision.py`](../so101_sim/vision.py) | Bounded RGB green-ball detection and timestamped missing-target handling. |
+| [`so101_sim/visual_grasp.py`](../so101_sim/visual_grasp.py) | Visual acquisition, approximate camera-derived position memory and six-action learned grasp task. |
 | [`so101_sim/vector_env.py`](../so101_sim/vector_env.py) | Optional subprocess environment startup and bounded worker cleanup. |
 | [`so101_sim/evaluate.py`](../so101_sim/evaluate.py) | Checked checkpoint loading, seeded comparisons, metrics, and policy playback. |
 | [`so101_sim/outputs.py`](../so101_sim/outputs.py) | Unique output directories, writer locks, and latest-checkpoint discovery. |

@@ -4,7 +4,7 @@
 
 The trainer uses PPO with a small multilayer perceptron on the CPU. Manual keyboard control is a separate application: starting the simulator does not start training or load a policy. All commands below run from the repository root in PowerShell, using the prepared project environment described in [Getting started](getting-started.md).
 
-The default task is [stage-one grasp, lift and hold v2](grasping.md), using six actuator actions and continuous approach feedback from both jaw pads. It requires a fresh compatible checkpoint; earlier three-joint reach and grasp-v1 checkpoints cannot be resumed into it. Each target is reused for 300 simulated seconds across retries, with exact-home resets. Implementing this task does not establish learned grasp performance.
+The default task is [visual search, grasp, lift and hold](cameras.md), using the original wrist camera and all six actuator actions from the first step. It starts at exact home, learns to bring the ball into view, and only receives grasp-progress credit after visual acquisition. `--task state` retains the [state-based grasp v2 task](grasping.md), which receives simulator ball coordinates. Vision requires a fresh compatible checkpoint. Each target is reused for 300 simulated seconds across retries. Implementing either task does not establish learned grasp performance.
 
 ## Choose a run mode
 
@@ -33,13 +33,13 @@ To continue from the latest available full-training checkpoint:
 
 `latest` resolves the existing latest-run pointer before the new output directory becomes the latest run. It uses the checkpoint selection described in [Experiment records](experiments.md), which prefers a best-validation checkpoint. To continue from a particular final or best policy, pass its path to `--resume` instead. Only supported full-training checkpoints can be resumed; `--trial --resume ...` is rejected before output creation.
 
-`latest` means the latest managed run, rather than the latest compatible policy. An earlier reach policy has three actions and 15 observations; the current grasp task has six actions and 39 observations. Finding that checkpoint successfully still cannot make it compatible. The resume error reports the saved/current tasks and shapes. For a fresh grasp run with a viewer and a 300,000-transition budget, use:
+`latest` means the latest managed run, rather than the latest compatible policy. Reach policies have three actions and 15 observations; the state grasp task uses six actions and 39 observations, and the visual task uses six actions and 38 observations. The resume error reports saved/current tasks and shapes. Select `--task state` for a compatible state checkpoint; a visual task needs a fresh visual checkpoint. For a fresh visual run with a viewer and a 300,000-transition budget, use:
 
 ```powershell
-.\.venv\Scripts\python -m so101_sim.train --timesteps 300000 --viewer
+.\.venv\Scripts\python -m so101_sim.train --task vision --timesteps 300000 --envs 1 --viewer --wrist-camera
 ```
 
-This starts new weights and optimizer state, and is also the way to begin using the v2 jaw-gap reward after a grasp-v1 run. Continuing a historical policy requires its matching source and environment; supplying its checkpoint path alone does not bypass the checks. Resume preflight rejects an incompatible checkpoint before allocating a new run or changing the latest pointer.
+This starts new weights and optimizer state for camera-based visual search. Continuing a historical policy requires its matching source and environment; supplying its checkpoint path alone does not bypass the checks. Resume preflight rejects an incompatible checkpoint before allocating a new run or changing the latest pointer.
 
 Continuation restores policy weights, the Adam optimizer state, and cumulative training counters through `DiagnosticPPO`. The new session initializes environments and random generators using the selected seed. It does not restore the previous ball pose, unfinished episode, or partially collected rollout, so it is not an exact replay of an uninterrupted process.
 
@@ -56,6 +56,8 @@ The parent checkpoint remains unchanged. The new run records its parent path, SH
 ```
 
 `--viewer` and its alias `--render` display environment zero. The terminal shows total training transitions, the observed episode count, distance to the ball, optimizer steps, and the current target's age in simulated seconds. Messages identify rollout collection and network optimization. The displayed robot may remain still during optimization or validation.
+
+Add `--wrist-camera` to display the policy camera image in the same viewer. In the visual task this reuses the exact 160×120 policy frame and marks `SEARCHING`/`ACQUIRED`; in the state task it is an observer. Camera mounting and home remain original. See [camera perception](cameras.md) for the 38-feature visual input, approximate depth and missing-target memory.
 
 The viewer runs at real time by default. Add `--viewer-speed 4` for four times simulation speed. Pacing changes wall-clock duration, while physics time, actions, and transition budgets remain the same. The viewer needs to be enabled when the run starts; it cannot attach to an existing headless run. Camera controls remain available. It displays independent model/data copies, so viewer physics controls do not edit training physics.
 
@@ -78,6 +80,8 @@ The terminal identifies checkpoint loading, each policy's start, in-flight progr
 | `--timesteps` | Unlimited | Session training transitions; additional transitions when resuming, or the initial rollout budget in trial mode. |
 | `--resume` | Unset | Explicit full-training checkpoint path or `latest`; restores policy and optimizer into a new run. |
 | `--seed` | `42` | Training seed. |
+| `--task` | `vision` | Camera-derived visual search/grasp task; `state` retains the state-based grasp task. |
+| `--wrist-camera` | Off | Camera inset, requiring `--viewer`; adds no controller actions. |
 | `--envs` | `8`, or `1` for trial | Number of environment copies. |
 | `--reward-scale` | `0.01` | Positive finite reward multiplier applied only to training. |
 | `--learning-rate` | `0.0003` | Positive finite PPO learning rate. |

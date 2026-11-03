@@ -2,7 +2,7 @@
 
 [Project overview](../README.md) · [Documentation index](README.md)
 
-The default learning task is now stage-one grasp, lift and hold, implemented in [so101_sim/grasp.py](../so101_sim/grasp.py). It controls all six joints and requires physical contact on both jaws with the ball clear of the desk. See [Grasping](grasping.md) for its interface and failure rules. The shared physical workspace and retained three-joint reach task, `SO101ReachableSurfaceBall-v4`, are implemented in [so101_sim/env.py](../so101_sim/env.py).
+The default learning task adds [camera-based visual search](cameras.md) to stage-one grasp, lift and hold. It controls all six joints and requires visual acquisition followed by physical contact on both jaws with the ball clear of the desk. The state-based task in [so101_sim/grasp.py](../so101_sim/grasp.py) remains available with `--task state`; see [Grasping](grasping.md) for its physical success and failure rules. The shared physical workspace and retained three-joint reach task, `SO101ReachableSurfaceBall-v4`, are implemented in [so101_sim/env.py](../so101_sim/env.py).
 
 ## Desk and robot placement
 
@@ -99,7 +99,7 @@ The policy receives 15 `float32` values:
 | Current ball center | 3 | Multiplied by 3 |
 | Ball center minus end-effector position | 3 | Multiplied by 5 |
 
-These are fixed feature scales. The current input does not include ball velocity, hold progress, or target time remaining, although diagnostic information exposes some of those quantities. The default grasp task uses a different observation including contact, ball velocity and hold/pin progress; these layouts are not interchangeable.
+These are fixed feature scales for the retained reach task. Its input does not include ball velocity, hold progress, or target time remaining, although diagnostic information exposes some of those quantities. State grasp has a separate 39-value contact/velocity layout; visual grasp has a 38-value RGB-feature/memory layout. These interfaces are not interchangeable.
 
 ## Retained reach-task success, failure, and reward
 

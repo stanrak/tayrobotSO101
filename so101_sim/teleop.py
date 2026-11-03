@@ -94,7 +94,7 @@ def _sync_keyboard_view(viewer, model, data, state: np.ndarray) -> None:
         viewer.sync(state_only=True)
 
 
-def run(*, seconds: float | None = None) -> None:
+def run(*, seconds: float | None = None, wrist_camera: bool = False) -> None:
     """Run real-time keyboard control; input is local to the focused viewer."""
     from so101_sim.env import SO101ReachEnv
 
@@ -108,6 +108,7 @@ def run(*, seconds: float | None = None) -> None:
             commands.put(command)
 
     env = SO101ReachEnv()
+    camera_inset = None
     try:
         env.reset(seed=0)
         names = tuple(env.joint_names)
@@ -148,6 +149,11 @@ def run(*, seconds: float | None = None) -> None:
         ) as viewer:
             with viewer.lock():
                 env.configure_camera(viewer.cam)
+            if wrist_camera:
+                from .camera_view import WristCameraInset
+
+                camera_inset = WristCameraInset(env.model)
+                camera_inset.update(viewer, env.data)
             paused = False
             quit_requested = False
             start = time.monotonic()
@@ -205,6 +211,8 @@ def run(*, seconds: float | None = None) -> None:
                             _print_targets(names, target)
                 if now >= next_render:
                     _sync_keyboard_view(viewer, env.model, env.data, viewer_state)
+                    if camera_inset is not None:
+                        camera_inset.update(viewer, env.data)
                     next_render = now + 1.0 / 60.0
                 next_tick += timestep
                 delay = next_tick - time.monotonic()
@@ -213,7 +221,11 @@ def run(*, seconds: float | None = None) -> None:
                 elif delay < -0.1:
                     next_tick = time.monotonic()
     finally:
-        env.close()
+        try:
+            if camera_inset is not None:
+                camera_inset.close()
+        finally:
+            env.close()
 
 
 def _positive_seconds(value: str) -> float:
@@ -230,9 +242,10 @@ def main() -> None:
         type=_positive_seconds,
         help="close automatically after this many wall-clock seconds",
     )
+    parser.add_argument("--wrist-camera", action="store_true", help="Show a wrist RGB inset with image-only ball detection; manual control is unchanged.")
     args = parser.parse_args()
     try:
-        run(seconds=args.seconds)
+        run(seconds=args.seconds, wrist_camera=args.wrist_camera)
     except KeyboardInterrupt:
         print("Keyboard control stopped.", flush=True)
 
