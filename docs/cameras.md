@@ -6,6 +6,26 @@ The robot has an original named MuJoCo camera, `wrist_cam`, attached to its grip
 
 The original camera may not see the ball at home. The visual task starts there anyway: all six joints are available from the first policy action so the robot can learn to bring the ball into view. There is no programmed scanning motion, inverse-kinematics controller or automatic gripper closure.
 
+## Headless learning or a live viewer
+
+Camera-based learning works in both display modes. Headless is the default: the policy still receives images from the original wrist camera, rendered offscreen, while no viewer window opens. This is the same visual task, observations and rewards as the viewer mode. An offscreen graphics context is still needed to produce camera images.
+
+For a fresh visual-learning run without a window:
+
+```powershell
+.\.venv\Scripts\python.exe -m so101_sim.train --task vision --timesteps 300000 --envs 1 --headless --seed 42
+```
+
+For the same configuration with a live viewer and camera inset:
+
+```powershell
+.\.venv\Scripts\python.exe -m so101_sim.train --task vision --timesteps 300000 --envs 1 --viewer --wrist-camera --seed 42
+```
+
+`--headless` and `--viewer` are alternative display selections. Omitting both runs headless. `--wrist-camera` only adds the visible inset and requires `--viewer`; it is not needed for camera-based perception. Each invocation creates its own run. The modes are choices for a run, rather than two simultaneous writers to one experiment. Switching a compatible checkpoint's display mode uses a new explicit `--resume` session.
+
+Standalone evaluation also accepts `--headless` or `--viewer` (`--render` is its viewer alias). The selected vision task processes camera images in either mode.
+
 ## Watch the camera
 
 For manual control with a camera inset:
@@ -15,12 +35,6 @@ For manual control with a camera inset:
 ```
 
 The inset appears in the lower-left corner of the same viewer. A yellow box and white cross identify a visible green ball. Missing, clipped or ambiguous detections show `NOT VISIBLE` without a stale target marker. The text includes the image's simulation timestamp.
-
-For a fresh visual-learning run with the inset:
-
-```powershell
-.\.venv\Scripts\python.exe -m so101_sim.train --task vision --timesteps 300000 --envs 1 --viewer --wrist-camera --seed 42
-```
 
 The training CLI defaults to `--task vision`. One environment is a useful initial interactive configuration because each visual environment owns a renderer and processes an RGB frame on every 20 Hz control step. The inset displays at most ten times per wall-clock second and reuses the policy's exact cached 160×120 image and detection. Enlarging the inset does not change policy resolution. Graphics and image processing add work; this feature does not establish faster training.
 

@@ -479,7 +479,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--resume", metavar="CHECKPOINT", help="Continue a full-training checkpoint, or 'latest'. --timesteps counts additional transitions; the default remains a fresh policy.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--task", choices=("vision", "state"), default="vision", help="Learn wrist-camera search and grasp (default: vision), or use the separate simulator-state grasp task. Checkpoints must match the selected task.")
-    parser.add_argument("--viewer", "--render", action="store_true", help="Watch actual training in a live MuJoCo viewer (environment 0).")
+    display = parser.add_mutually_exclusive_group()
+    display.add_argument("--viewer", "--render", action="store_true", help="Watch actual training in a live MuJoCo viewer (environment 0). Camera-based learning also works without this flag.")
+    display.add_argument("--headless", dest="viewer", action="store_false", help="Train without a viewer window (default). The visual task still renders camera observations offscreen.")
+    parser.set_defaults(viewer=False)
     parser.add_argument("--viewer-speed", type=_finite_float, default=1.0, help="Viewer simulation speed multiplier (default: 1, real time).")
     parser.add_argument("--wrist-camera", action="store_true", help="Show the wrist RGB inset with --viewer. --task vision selects camera-derived policy inputs; this flag only adds their display.")
     parser.add_argument("--envs", type=int, help="Parallel environments (startup trial: 1 only; full training default: 8).")
@@ -630,6 +633,7 @@ def _run(args, output: Path) -> None:
         "parent_run_id": resume.path.parent.name if resume is not None else None,
         **{f"starting_{key}": value for key, value in starting.items()},
         "live_viewer": args.viewer,
+        "display_mode": "viewer" if args.viewer else "headless",
         "viewer_speed": args.viewer_speed if args.viewer else None,
         "wrist_camera_observer": args.wrist_camera,
         "started_utc": datetime.now(timezone.utc).isoformat(),

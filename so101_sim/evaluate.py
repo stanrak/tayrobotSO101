@@ -442,7 +442,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--seed", type=int, default=20_000)
     parser.add_argument("--task", choices=("vision", "state"), default="vision", help="Checkpoint task (default: vision); use state for simulator-state grasp checkpoints. Exact compatibility checks still apply.")
     parser.add_argument("--output", type=Path, help="Optional new report file; existing files are rejected. Default: a unique evaluation directory next to the checkpoint.")
-    parser.add_argument("--render", action="store_true", help="Play trained-policy episodes at real time in MuJoCo.")
+    display = parser.add_mutually_exclusive_group()
+    display.add_argument("--render", "--viewer", action="store_true", help="Play trained-policy episodes at real time in MuJoCo.")
+    display.add_argument("--headless", dest="render", action="store_false", help="Evaluate without a viewer window (default); visual policies still receive camera observations.")
+    parser.set_defaults(render=False)
     args = parser.parse_args(argv)
     try:
         with evaluation_output(args.output, checkpoint=args.checkpoint, seed=args.seed) as output:

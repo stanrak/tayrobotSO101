@@ -6,6 +6,8 @@ The trainer uses PPO with a small multilayer perceptron on the CPU. Manual keybo
 
 The default task is [visual search, grasp, lift and hold](cameras.md), using the original wrist camera and all six actuator actions from the first step. It starts at exact home, learns to bring the ball into view, and only receives grasp-progress credit after visual acquisition. `--task state` retains the [state-based grasp v2 task](grasping.md), which receives simulator ball coordinates. Vision requires a fresh compatible checkpoint. Each target is reused for 300 simulated seconds across retries. Implementing either task does not establish learned grasp performance.
 
+Visual learning runs headless by default: the original camera produces policy images offscreen without a visible viewer. Explicit `--headless` selects that mode; `--viewer` adds live observation, with optional `--wrist-camera` for the image inset. Both use the same camera-derived policy inputs and task. See the [paired commands](cameras.md#headless-learning-or-a-live-viewer).
+
 ## Choose a run mode
 
 | Mode | Command | Result |
@@ -82,6 +84,7 @@ The terminal identifies checkpoint loading, each policy's start, in-flight progr
 | `--seed` | `42` | Training seed. |
 | `--task` | `vision` | Camera-derived visual search/grasp task; `state` retains the state-based grasp task. |
 | `--wrist-camera` | Off | Camera inset, requiring `--viewer`; adds no controller actions. |
+| `--headless` | Default when no viewer flag is given | No viewer window; visual camera capture remains active. Mutually exclusive with `--viewer`/`--render`. |
 | `--envs` | `8`, or `1` for trial | Number of environment copies. |
 | `--reward-scale` | `0.01` | Positive finite reward multiplier applied only to training. |
 | `--learning-rate` | `0.0003` | Positive finite PPO learning rate. |
